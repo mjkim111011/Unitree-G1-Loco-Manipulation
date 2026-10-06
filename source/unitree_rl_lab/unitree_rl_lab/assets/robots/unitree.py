@@ -8,6 +8,7 @@
 Reference: https://github.com/unitreerobotics/unitree_ros
 """
 
+import copy
 import os
 
 import isaaclab.sim as sim_utils
@@ -17,8 +18,8 @@ from isaaclab.utils import configclass
 
 from unitree_rl_lab.assets.robots import unitree_actuators
 
-UNITREE_MODEL_DIR = "path/to/unitree_model"  # Replace with the actual path to your unitree_model directory
-UNITREE_ROS_DIR = "path/to/unitree_ros"  # Replace with the actual path to your unitree_ros package
+UNITREE_MODEL_DIR = "/home/unitree_model"  # Replace with the actual path to your unitree_model directory
+UNITREE_ROS_DIR = os.environ.get("UNITREE_ROS_DIR", os.path.expanduser("~/unitree_ros"))
 
 
 @configclass
@@ -507,6 +508,70 @@ UNITREE_G1_29DOF_CFG = UnitreeArticulationCfg(
         "right_wrist_pitch_joint",
         "right_wrist_yaw_joint",
     ],
+)
+
+
+UNITREE_G1_DEX3_HAND_JOINT_NAMES = [
+    "left_hand_thumb_0_joint",
+    "left_hand_thumb_1_joint",
+    "left_hand_thumb_2_joint",
+    "left_hand_index_0_joint",
+    "left_hand_index_1_joint",
+    "left_hand_middle_0_joint",
+    "left_hand_middle_1_joint",
+    "right_hand_thumb_0_joint",
+    "right_hand_thumb_1_joint",
+    "right_hand_thumb_2_joint",
+    "right_hand_index_0_joint",
+    "right_hand_index_1_joint",
+    "right_hand_middle_0_joint",
+    "right_hand_middle_1_joint",
+]
+
+UNITREE_G1_43DOF_WITH_HAND_CFG = copy.deepcopy(UNITREE_G1_29DOF_CFG)
+UNITREE_G1_43DOF_WITH_HAND_CFG.spawn = UnitreeUrdfFileCfg(
+    asset_path=f"{UNITREE_ROS_DIR}/robots/g1_description/g1_29dof_with_hand_rev_1_0.urdf",
+)
+UNITREE_G1_43DOF_WITH_HAND_CFG.init_state.joint_pos.update(
+    {
+        "left_hand_thumb_0_joint": 0.0,
+        "left_hand_thumb_1_joint": 0.7,
+        "left_hand_thumb_2_joint": 1.1,
+        "left_hand_index_0_joint": -0.8,
+        "left_hand_index_1_joint": -1.0,
+        "left_hand_middle_0_joint": -0.8,
+        "left_hand_middle_1_joint": -1.0,
+        "right_hand_thumb_0_joint": 0.0,
+        "right_hand_thumb_1_joint": -0.7,
+        "right_hand_thumb_2_joint": -1.1,
+        "right_hand_index_0_joint": 0.8,
+        "right_hand_index_1_joint": 1.0,
+        "right_hand_middle_0_joint": 0.8,
+        "right_hand_middle_1_joint": 1.0,
+    }
+)
+UNITREE_G1_43DOF_WITH_HAND_CFG.actuators["Dex3-hand"] = ImplicitActuatorCfg(
+    joint_names_expr=[".*_hand_.*_joint"],
+    effort_limit_sim={
+        ".*_thumb_0_joint": 2.45,
+        ".*_thumb_1_joint": 1.4,
+        ".*_thumb_2_joint": 1.4,
+        ".*_index_.*_joint": 1.4,
+        ".*_middle_.*_joint": 1.4,
+    },
+    velocity_limit_sim={
+        ".*_thumb_0_joint": 3.14,
+        ".*_thumb_1_joint": 12.0,
+        ".*_thumb_2_joint": 12.0,
+        ".*_index_.*_joint": 12.0,
+        ".*_middle_.*_joint": 12.0,
+    },
+    stiffness=1.5,
+    damping=0.1,
+    armature=0.001,
+)
+UNITREE_G1_43DOF_WITH_HAND_CFG.joint_sdk_names = (
+    UNITREE_G1_29DOF_CFG.joint_sdk_names.copy() + UNITREE_G1_DEX3_HAND_JOINT_NAMES
 )
 
 

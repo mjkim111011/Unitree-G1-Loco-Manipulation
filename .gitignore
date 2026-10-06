@@ -73,3 +73,22 @@ datasets
 
 # Mimic
 *.npz
+
+# Reproducible development workspaces and private/heavy research artifacts
+/.venv*/
+/external/
+/data/
+/handoff/
+/handoff.zip
+/dist/
+/packaging/validation/
+# Local-only installation/GitHub publishing guide; keep runtime tools public.
+/packaging/README.md
+/.workspace.env
+.env
+.env.*
+!.env.example
+*.hdf5
+*.h5
+*.mp4
+*.onnx

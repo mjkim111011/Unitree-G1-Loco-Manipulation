@@ -43,6 +43,18 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
+parser.add_argument(
+    "--bc_residual",
+    action="store_true",
+    help="Train PPO as a bounded residual over four frozen 43-D BC nominal policies.",
+)
+parser.add_argument("--bc_approach_checkpoint", type=str, default=None)
+parser.add_argument("--bc_grasp_checkpoint", type=str, default=None)
+parser.add_argument("--bc_carry_checkpoint", type=str, default=None)
+parser.add_argument("--bc_place_checkpoint", type=str, default=None)
+parser.add_argument("--bc2_gate", type=str, default=None)
+parser.add_argument("--residual_scale", type=float, default=0.20)
+parser.add_argument("--residual_handoff_steps", type=int, default=100)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -110,6 +122,9 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import unitree_rl_lab.tasks  # noqa: F401
 from unitree_rl_lab.utils.export_deploy_cfg import export_deploy_cfg
+from unitree_rl_lab.utils.rnd_safety import install_rnd_safety_mask
+from unitree_rl_lab.utils.bc_residual import BcResidualActionWrapper, ResidualNominalCfg
+from unitree_rl_lab.utils.teacher.skill_fsm import SkillPhase
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -126,6 +141,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if args_cli.bc_residual:
+        required = {
+            "--bc_approach_checkpoint": args_cli.bc_approach_checkpoint,
+            "--bc_grasp_checkpoint": args_cli.bc_grasp_checkpoint,
+            "--bc_carry_checkpoint": args_cli.bc_carry_checkpoint,
+            "--bc_place_checkpoint": args_cli.bc_place_checkpoint,
+            "--bc2_gate": args_cli.bc2_gate,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise ValueError(f"--bc_residual requires: {', '.join(missing)}")
+        agent_cfg.experiment_name = "g1_43dof_box_pick_place_bc_residual_rnd"
+        # Start exactly at the frozen BC nominal controller. Exploration is a
+        # small correction around that baseline, not a second random 43-DoF
+        # controller layered on top of it.
+        agent_cfg.policy.init_noise_std = 0.05
+        agent_cfg.algorithm.entropy_coef = min(agent_cfg.algorithm.entropy_coef, 5.0e-4)
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -161,6 +193,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
 
+    residual_wrapper = None
+    if args_cli.bc_residual:
+        residual_wrapper = BcResidualActionWrapper(
+            env,
+            checkpoints={
+                SkillPhase.APPROACH: args_cli.bc_approach_checkpoint,
+                SkillPhase.GRASP_LIFT: args_cli.bc_grasp_checkpoint,
+                SkillPhase.CARRY: args_cli.bc_carry_checkpoint,
+                SkillPhase.PLACE: args_cli.bc_place_checkpoint,
+            },
+            bc2_gate=args_cli.bc2_gate,
+            device=agent_cfg.device,
+            cfg=ResidualNominalCfg(
+                residual_scale=args_cli.residual_scale,
+                handoff_steps=args_cli.residual_handoff_steps,
+            ),
+        )
+        env = residual_wrapper
+        print(
+            "[INFO] Enabled four-policy 43-D BC nominal controller with "
+            f"bounded PPO residual scale {args_cli.residual_scale}."
+        )
+
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
@@ -182,6 +237,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create runner from rsl-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    if residual_wrapper is not None and not agent_cfg.resume:
+        actor_linear_layers = [
+            module for module in runner.alg.policy.actor.modules() if isinstance(module, torch.nn.Linear)
+        ]
+        if not actor_linear_layers or actor_linear_layers[-1].out_features != 43:
+            raise RuntimeError("could not identify the 43-D residual actor output layer")
+        torch.nn.init.zeros_(actor_linear_layers[-1].weight)
+        torch.nn.init.zeros_(actor_linear_layers[-1].bias)
+        print("[INFO] Zero-initialized PPO residual mean at the frozen BC nominal action.")
+    # Box pick-and-place exposes this internal-only observation group.  It
+    # prevents RND from rewarding unsafe/falling states without patching the
+    # environment-wide rsl_rl installation used by other tasks.
+    if getattr(runner.alg, "rnd", None) is not None and "rnd_safety_mask" in env.get_observations().keys():
+        install_rnd_safety_mask(runner.alg, observation_key="rnd_safety_mask")
+        print("[INFO] Enabled hard RND safety mask for unsafe and terminal transitions.")
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
@@ -193,7 +263,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
-    export_deploy_cfg(env.unwrapped, log_dir)
+    if residual_wrapper is not None:
+        import json
+
+        residual_path = os.path.join(log_dir, "params", "bc_residual.json")
+        with open(residual_path, "w", encoding="utf-8") as stream:
+            json.dump(residual_wrapper.provenance(), stream, indent=2, sort_keys=True)
+            stream.write("\n")
+    export_deploy_cfg(env.unwrapped, log_dir, agent_cfg.obs_groups["policy"])
     # copy the environment configuration file to the log directory
     shutil.copy(
         inspect.getfile(env_cfg.__class__),

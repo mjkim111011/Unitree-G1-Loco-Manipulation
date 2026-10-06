@@ -9,6 +9,8 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 
+from .workspace import environment_point_w
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -32,6 +34,12 @@ def ensure_task_phase_buffers(env: ManagerBasedRLEnv) -> None:
             env.phase_best_cage_distance = torch.full((env.num_envs,), float("inf"), device=env.device)
         if not hasattr(env, "phase_best_close_contact_score"):
             env.phase_best_close_contact_score = torch.zeros(env.num_envs, device=env.device)
+        if not hasattr(env, "phase_best_pre_lift_fraction"):
+            env.phase_best_pre_lift_fraction = torch.zeros(env.num_envs, device=env.device)
+        if not hasattr(env, "phase_pre_lift_escrow"):
+            env.phase_pre_lift_escrow = torch.zeros(env.num_envs, device=env.device)
+        if not hasattr(env, "phase_pre_lift_escrow_steps"):
+            env.phase_pre_lift_escrow_steps = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
         return
 
     env.task_phase = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
@@ -62,6 +70,15 @@ def ensure_task_phase_buffers(env: ManagerBasedRLEnv) -> None:
     env.phase_best_hand_distance = torch.full((env.num_envs,), float("inf"), device=env.device)
     env.phase_best_cage_distance = torch.full((env.num_envs,), float("inf"), device=env.device)
     env.phase_best_close_contact_score = torch.zeros(env.num_envs, device=env.device)
+    # This has a separate potential from the strict lift term.  A low-force
+    # contact can earn the short pre-lift bridge without consuming the later
+    # stable-contact lift reward.
+    env.phase_best_pre_lift_fraction = torch.zeros(env.num_envs, device=env.device)
+    # The short pre-lift bridge is paid only after a continuous safe-stability
+    # window.  Until then it is escrowed and discarded as soon as the posture
+    # or the grasp ceases to be safe.
+    env.phase_pre_lift_escrow = torch.zeros(env.num_envs, device=env.device)
+    env.phase_pre_lift_escrow_steps = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
     env.phase_best_lift_fraction = torch.zeros(env.num_envs, device=env.device)
     env.phase_best_staging_distance = torch.full((env.num_envs,), float("inf"), device=env.device)
     env.phase_best_bin_distance = torch.full((env.num_envs,), float("inf"), device=env.device)
@@ -92,6 +109,9 @@ def reset_task_phase_episode(
     env.phase_best_hand_distance[env_ids] = float("inf")
     env.phase_best_cage_distance[env_ids] = float("inf")
     env.phase_best_close_contact_score[env_ids] = 0.0
+    env.phase_best_pre_lift_fraction[env_ids] = 0.0
+    env.phase_pre_lift_escrow[env_ids] = 0.0
+    env.phase_pre_lift_escrow_steps[env_ids] = 0
     env.phase_best_lift_fraction[env_ids] = 0.0
     env.phase_best_staging_distance[env_ids] = float("inf")
     env.phase_best_bin_distance[env_ids] = float("inf")
@@ -107,6 +127,8 @@ def reset_task_phase_attempt(env: ManagerBasedRLEnv, env_ids: torch.Tensor) -> N
     env.phase_stable_hold[env_ids] = False
     env.phase_stable_contact_steps[env_ids] = 0
     env.phase_stable_contact[env_ids] = False
+    env.phase_pre_lift_escrow[env_ids] = 0.0
+    env.phase_pre_lift_escrow_steps[env_ids] = 0
 
 
 def _filtered_box_contact_count(
@@ -126,6 +148,29 @@ def _filtered_box_contact_count(
         force_norm = torch.linalg.vector_norm(forces, dim=-1).flatten(start_dim=1).amax(dim=-1)
         count += (force_norm >= contact_force_threshold).long()
     return count
+
+
+def _bimanual_box_contact_counts(
+    env: ManagerBasedRLEnv,
+    left_box_contact_sensor_names: tuple[str, ...],
+    right_box_contact_sensor_names: tuple[str, ...],
+    contact_force_threshold: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return Box-only fingertip-contact counts for the left and right hands.
+
+    The aggregate six-fingertip count alone cannot distinguish a real
+    two-handed grasp from two fingers on the same hand.  Keep the two groups
+    explicit rather than inferring sides from body indices, so the task stays
+    correct for robot-asset variants with a different body ordering.
+    """
+    if not left_box_contact_sensor_names or not right_box_contact_sensor_names:
+        raise ValueError(
+            "Bimanual grasp metrics require non-empty left and right Box-contact sensor name tuples."
+        )
+    return (
+        _filtered_box_contact_count(env, left_box_contact_sensor_names, contact_force_threshold),
+        _filtered_box_contact_count(env, right_box_contact_sensor_names, contact_force_threshold),
+    )
 
 
 def _body_ids_from_cfg(robot: Articulation, body_cfg: SceneEntityCfg | None) -> list[int]:
@@ -228,10 +273,124 @@ def _hand_object_distances(
     return fingertip_distances, hand_distance
 
 
+def _bimanual_fingertip_distances(
+    env: ManagerBasedRLEnv,
+    robot: Articulation,
+    obj: RigidObject,
+    left_box_contact_sensor_names: tuple[str, ...],
+    right_box_contact_sensor_names: tuple[str, ...],
+    robot_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return per-fingertip object distances separately for both hands."""
+    left_fingertip_distances, _ = _hand_object_distances(
+        env,
+        robot,
+        obj,
+        left_box_contact_sensor_names,
+        None,
+        robot_cfg,
+        require_fingertips=True,
+    )
+    right_fingertip_distances, _ = _hand_object_distances(
+        env,
+        robot,
+        obj,
+        right_box_contact_sensor_names,
+        None,
+        robot_cfg,
+        require_fingertips=True,
+    )
+    return left_fingertip_distances, right_fingertip_distances
+
+
 def _nth_nearest_fingertip_distance(fingertip_distances: torch.Tensor, min_fingertips: int) -> torch.Tensor:
     """Distance of the ``min_fingertips``-th closest fingertip to the Box."""
     k = min(max(1, min_fingertips), fingertip_distances.shape[-1])
     return torch.topk(fingertip_distances, k=k, largest=False, dim=-1).values[:, -1]
+
+
+def _supported_upright_stance(
+    env: ManagerBasedRLEnv,
+    robot: Articulation,
+    max_base_tilt_angle: float,
+    min_base_height: float,
+    feet_sensor_cfg: SceneEntityCfg | None,
+    min_foot_contact_force: float,
+    min_supported_feet: int | None = None,
+) -> torch.Tensor:
+    """Return an upright, high-enough supported-base predicate.
+
+    A three-frame maximum force history is used rather than a single contact
+    flag.  It matches the existing feet-slide reward's contact convention and
+    avoids flickering the manipulation reward on a one-physics-step foot
+    sensor transition.
+    """
+    base_tilt = torch.acos(torch.clamp(-robot.data.projected_gravity_b[:, 2], -1.0, 1.0))
+    base_height_e = robot.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    supported = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    if feet_sensor_cfg is not None:
+        contact_sensor: ContactSensor = env.scene.sensors[feet_sensor_cfg.name]
+        contact_force = torch.linalg.vector_norm(
+            contact_sensor.data.net_forces_w_history[:, :, feet_sensor_cfg.body_ids, :], dim=-1
+        ).amax(dim=1)
+        in_contact = contact_force >= min_foot_contact_force
+        # Manipulation shaping uses the conservative default of both feet.
+        # Pre-grasp locomotion deliberately asks for only one supported foot,
+        # because a normal walking step has a single-support interval.
+        supported = (
+            torch.all(in_contact, dim=-1)
+            if min_supported_feet is None
+            else torch.sum(in_contact, dim=-1) >= min_supported_feet
+        )
+    return (base_tilt <= max_base_tilt_angle) & (base_height_e >= min_base_height) & supported
+
+
+def grasp_stance_valid(
+    env: ManagerBasedRLEnv,
+    max_base_tilt_angle: float,
+    min_base_height: float,
+    feet_sensor_cfg: SceneEntityCfg | None,
+    min_foot_contact_force: float = 1.0,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Return the strict stability gate used by all positive GRASP shaping."""
+    ensure_task_phase_buffers(env)
+    robot: Articulation = env.scene[robot_cfg.name]
+    return (env.task_phase == GRASP_PHASE) & _supported_upright_stance(
+        env,
+        robot,
+        max_base_tilt_angle,
+        min_base_height,
+        feet_sensor_cfg,
+        min_foot_contact_force,
+    )
+
+
+def grasp_walk_stance_valid(
+    env: ManagerBasedRLEnv,
+    max_base_tilt_angle: float,
+    min_base_height: float,
+    feet_sensor_cfg: SceneEntityCfg | None,
+    min_foot_contact_force: float = 1.0,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Return the safe one-foot-support gate used while walking to pre-grasp.
+
+    This is intentionally separate from :func:`grasp_stance_valid`: arm and
+    lift shaping still require double support, while the camera-derived
+    pre-grasp command must survive normal single-support gait frames.
+    """
+    ensure_task_phase_buffers(env)
+    robot: Articulation = env.scene[robot_cfg.name]
+    return (env.task_phase == GRASP_PHASE) & _supported_upright_stance(
+        env,
+        robot,
+        max_base_tilt_angle,
+        min_base_height,
+        feet_sensor_cfg,
+        min_foot_contact_force,
+        min_supported_feet=1,
+    )
 
 
 def _safe_pregrasp_state(
@@ -242,17 +401,26 @@ def _safe_pregrasp_state(
     max_pregrasp_object_displacement: float,
     max_pregrasp_object_speed: float,
     max_pregrasp_lift_height: float,
+    min_base_height: float = 0.0,
+    feet_sensor_cfg: SceneEntityCfg | None = None,
+    min_foot_contact_force: float = 1.0,
 ) -> torch.Tensor:
     """Gate pre-contact shaping so pushing, tossing, and falling do not pay."""
     ensure_task_phase_buffers(env)
-    base_tilt = torch.acos(torch.clamp(-robot.data.projected_gravity_b[:, 2], -1.0, 1.0))
     object_displacement = torch.linalg.vector_norm(obj.data.root_pos_w - env.phase_object_start_pos, dim=-1)
     object_speed = torch.linalg.vector_norm(obj.data.root_lin_vel_w, dim=-1)
     lift_height = obj.data.root_pos_w[:, 2] - env.phase_object_start_height
     return (
         (env.task_phase == GRASP_PHASE)
         & ~env.phase_stable_contact
-        & (base_tilt <= max_base_tilt_angle)
+        & _supported_upright_stance(
+            env,
+            robot,
+            max_base_tilt_angle,
+            min_base_height,
+            feet_sensor_cfg,
+            min_foot_contact_force,
+        )
         & (object_displacement <= max_pregrasp_object_displacement)
         & (object_speed <= max_pregrasp_object_speed)
         & (lift_height <= max_pregrasp_lift_height)
@@ -262,8 +430,11 @@ def _safe_pregrasp_state(
 def _grasp_metrics(
     env: ManagerBasedRLEnv,
     box_contact_sensor_names: tuple[str, ...],
+    left_box_contact_sensor_names: tuple[str, ...],
+    right_box_contact_sensor_names: tuple[str, ...],
     contact_force_threshold: float,
     min_box_contacts: int,
+    min_box_contacts_per_hand: int,
     max_hand_object_distance: float,
     min_hold_lift_height: float,
     max_relative_object_speed: float,
@@ -287,13 +458,24 @@ def _grasp_metrics(
         require_fingertips=True,
     )
     box_contact_count = _filtered_box_contact_count(env, box_contact_sensor_names, contact_force_threshold)
+    left_box_contact_count, right_box_contact_count = _bimanual_box_contact_counts(
+        env,
+        left_box_contact_sensor_names,
+        right_box_contact_sensor_names,
+        contact_force_threshold,
+    )
     has_box_contact = box_contact_count > 0
 
     lift_height = obj.data.root_pos_w[:, 2] - env.phase_object_start_height
     relative_speed = torch.linalg.vector_norm(obj.data.root_lin_vel_w - robot.data.root_lin_vel_w, dim=-1)
     base_tilt = torch.acos(torch.clamp(-robot.data.projected_gravity_b[:, 2], -1.0, 1.0))
+    bimanual_contact = (
+        (left_box_contact_count >= min_box_contacts_per_hand)
+        & (right_box_contact_count >= min_box_contacts_per_hand)
+    )
     contact_candidate = (
         (box_contact_count >= min_box_contacts)
+        & bimanual_contact
         & (hand_distance <= max_hand_object_distance)
         & (relative_speed <= max_relative_object_speed)
         & (base_tilt <= max_base_tilt_angle)
@@ -303,6 +485,9 @@ def _grasp_metrics(
         "hand_distance": hand_distance,
         "fingertip_distances": fingertip_distances,
         "box_contact_count": box_contact_count,
+        "left_box_contact_count": left_box_contact_count,
+        "right_box_contact_count": right_box_contact_count,
+        "bimanual_contact": bimanual_contact,
         "has_box_contact": has_box_contact,
         "lift_height": lift_height,
         "relative_speed": relative_speed,
@@ -355,6 +540,8 @@ def _mark_retry(env: ManagerBasedRLEnv, retry_envs: torch.Tensor) -> None:
     env.phase_stable_hold[retry_envs] = False
     env.phase_stable_contact_steps[retry_envs] = 0
     env.phase_stable_contact[retry_envs] = False
+    env.phase_pre_lift_escrow[retry_envs] = 0.0
+    env.phase_pre_lift_escrow_steps[retry_envs] = 0
 
 
 def sequential_phase_task_reward(
@@ -369,12 +556,19 @@ def sequential_phase_task_reward(
     stable_hold_duration_s: float,
     drop_grace_duration_s: float,
     box_contact_sensor_names: tuple[str, ...],
+    left_box_contact_sensor_names: tuple[str, ...],
+    right_box_contact_sensor_names: tuple[str, ...],
     contact_force_threshold: float,
     min_box_contacts: int,
+    min_box_contacts_per_hand: int,
     max_hand_object_distance: float,
     min_hold_lift_height: float,
     max_relative_object_speed: float,
     max_base_tilt_angle: float,
+    grasp_stance_max_base_tilt_angle: float,
+    grasp_stance_min_base_height: float,
+    feet_sensor_cfg: SceneEntityCfg,
+    min_foot_contact_force: float,
     bin_target_pos_e: tuple[float, float, float],
     bin_inner_half_extents: tuple[float, float, float],
     hand_body_cfg: SceneEntityCfg,
@@ -396,8 +590,11 @@ def sequential_phase_task_reward(
     metrics = _grasp_metrics(
         env,
         box_contact_sensor_names,
+        left_box_contact_sensor_names,
+        right_box_contact_sensor_names,
         contact_force_threshold,
         min_box_contacts,
+        min_box_contacts_per_hand,
         max_hand_object_distance,
         min_hold_lift_height,
         max_relative_object_speed,
@@ -406,15 +603,30 @@ def sequential_phase_task_reward(
         robot_cfg,
         object_cfg,
     )
+    # A carry can legitimately use single support while walking.  In contrast,
+    # an arm-reaching GRASP must qualify its first real contact from a stable,
+    # double-supported stance.  This prevents an unstable reach from latching
+    # a contact/hold state or advancing the phase bonus.
+    grasp_stance = grasp_stance_valid(
+        env,
+        grasp_stance_max_base_tilt_angle,
+        grasp_stance_min_base_height,
+        feet_sensor_cfg,
+        min_foot_contact_force,
+        robot_cfg,
+    )
+    grasp_phase = phase == GRASP_PHASE
+    contact_candidate = metrics["contact_candidate"] & (~grasp_phase | grasp_stance)
+    hold_candidate = metrics["hold_candidate"] & (~grasp_phase | grasp_stance)
     manipulation_phase = (phase == GRASP_PHASE) | (phase == CARRY_PHASE)
     _update_stable_contact(
         env,
-        manipulation_phase & metrics["contact_candidate"],
+        manipulation_phase & contact_candidate,
         stable_contact_duration_s,
     )
     stable_hold = _update_stable_hold(
         env,
-        manipulation_phase & metrics["hold_candidate"],
+        manipulation_phase & hold_candidate,
         stable_hold_duration_s,
     )
 
@@ -443,7 +655,7 @@ def sequential_phase_task_reward(
     )
     carry_failed = carry_phase & (env.phase_hold_lost_steps >= grace_steps)
 
-    bin_target_pos_w = env.scene.env_origins + torch.tensor(bin_target_pos_e, device=env.device)
+    bin_target_pos_w = environment_point_w(env, bin_target_pos_e, "bin_center_e")
     bin_half_extents = torch.tensor(bin_inner_half_extents, device=env.device)
     delivered = torch.all(torch.abs(obj.data.root_pos_w - bin_target_pos_w) < bin_half_extents, dim=-1)
     place_succeeded = (phase == PLACE_PHASE) & delivered
@@ -471,30 +683,37 @@ def grasp_approach_progress(
     max_base_tilt_angle: float,
     hand_body_cfg: SceneEntityCfg,
     box_contact_sensor_names: tuple[str, ...] = (),
+    left_box_contact_sensor_names: tuple[str, ...] = (),
+    right_box_contact_sensor_names: tuple[str, ...] = (),
     max_pregrasp_object_displacement: float = 0.05,
     max_pregrasp_object_speed: float = 0.50,
     max_pregrasp_lift_height: float = 0.03,
+    min_base_height: float = 0.0,
+    feet_sensor_cfg: SceneEntityCfg | None = None,
+    min_foot_contact_force: float = 1.0,
     object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Monotonic fingertip/palm-proxy reach progress while the Box is stationary.
+    """Monotonic bimanual fingertip reach progress while the Box is stationary.
 
-    ``box_contact_sensor_names`` should name the six filtered fingertip sensors.
-    Supplying it replaces the old wrist-only distance with the minimum over
-    those fingertips plus ``hand_body_cfg``'s palm/wrist proxy.  The empty
-    default preserves compatibility with legacy configurations.
+    The farther hand is the potential bottleneck, so a single reaching hand
+    cannot consume the bimanual approach reward by itself.
     """
     ensure_task_phase_buffers(env)
     robot: Articulation = env.scene[robot_cfg.name]
     obj: RigidObject = env.scene[object_cfg.name]
-    _, distance = _hand_object_distances(
+    left_fingertip_distances, right_fingertip_distances = _bimanual_fingertip_distances(
         env,
         robot,
         obj,
-        box_contact_sensor_names,
-        hand_body_cfg,
+        left_box_contact_sensor_names,
+        right_box_contact_sensor_names,
         robot_cfg,
-        require_fingertips=False,
+    )
+    # The farther hand is the bottleneck.  Rewarding the overall nearest hand
+    # would reproduce the observed one-handed reach local optimum.
+    distance = torch.maximum(
+        left_fingertip_distances.amin(dim=-1), right_fingertip_distances.amin(dim=-1)
     )
     active = _safe_pregrasp_state(
         env,
@@ -504,6 +723,9 @@ def grasp_approach_progress(
         max_pregrasp_object_displacement,
         max_pregrasp_object_speed,
         max_pregrasp_lift_height,
+        min_base_height,
+        feet_sensor_cfg,
+        min_foot_contact_force,
     ) & (distance <= max_hand_object_distance)
     initialized = torch.isfinite(env.phase_best_hand_distance)
     improvement = torch.where(
@@ -511,8 +733,11 @@ def grasp_approach_progress(
         torch.clamp(env.phase_best_hand_distance - distance, min=0.0),
         torch.zeros_like(distance),
     )
+    # Update the baseline throughout GRASP, including unsafe frames.  This
+    # deliberately burns reach progress made while falling so it cannot be
+    # paid after the robot later recovers an upright stance.
     env.phase_best_hand_distance = torch.where(
-        active,
+        env.task_phase == GRASP_PHASE,
         torch.minimum(env.phase_best_hand_distance, distance),
         env.phase_best_hand_distance,
     )
@@ -524,34 +749,41 @@ def grasp_cage_progress(
     cage_distance: float,
     max_base_tilt_angle: float,
     box_contact_sensor_names: tuple[str, ...],
+    left_box_contact_sensor_names: tuple[str, ...],
+    right_box_contact_sensor_names: tuple[str, ...],
     min_cage_fingertips: int = 2,
+    min_cage_fingertips_per_hand: int = 1,
     max_pregrasp_object_displacement: float = 0.05,
     max_pregrasp_object_speed: float = 0.50,
     max_pregrasp_lift_height: float = 0.03,
+    min_base_height: float = 0.0,
+    feet_sensor_cfg: SceneEntityCfg | None = None,
+    min_foot_contact_force: float = 1.0,
     object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Reward monotonic approach of multiple fingertips before Box contact.
+    """Reward monotonic two-handed fingertip enclosure before Box contact.
 
-    The potential is the distance of the second-nearest (or configured
-    ``min_cage_fingertips``-nearest) fingertip.  It cannot be collected by
-    repeatedly opening/closing or moving the Box: only an upright, nearly
-    stationary Box in the grasp phase is eligible and each improvement is
-    latched by the per-episode best potential.
+    The potential is the farther hand's configured closest fingertip.  It
+    cannot be collected by repeatedly opening/closing or moving the Box: only
+    an upright, nearly stationary Box in the grasp phase is eligible and each
+    improvement is latched by the per-episode best potential.
     """
     ensure_task_phase_buffers(env)
     robot: Articulation = env.scene[robot_cfg.name]
     obj: RigidObject = env.scene[object_cfg.name]
-    fingertip_distances, _ = _hand_object_distances(
+    left_fingertip_distances, right_fingertip_distances = _bimanual_fingertip_distances(
         env,
         robot,
         obj,
-        box_contact_sensor_names,
-        None,
+        left_box_contact_sensor_names,
+        right_box_contact_sensor_names,
         robot_cfg,
-        require_fingertips=True,
     )
-    cage_metric = _nth_nearest_fingertip_distance(fingertip_distances, min_cage_fingertips)
+    cage_metric = torch.maximum(
+        _nth_nearest_fingertip_distance(left_fingertip_distances, min_cage_fingertips_per_hand),
+        _nth_nearest_fingertip_distance(right_fingertip_distances, min_cage_fingertips_per_hand),
+    )
     active = _safe_pregrasp_state(
         env,
         obj,
@@ -560,6 +792,9 @@ def grasp_cage_progress(
         max_pregrasp_object_displacement,
         max_pregrasp_object_speed,
         max_pregrasp_lift_height,
+        min_base_height,
+        feet_sensor_cfg,
+        min_foot_contact_force,
     ) & (cage_metric <= cage_distance)
     initialized = torch.isfinite(env.phase_best_cage_distance)
     improvement = torch.where(
@@ -568,7 +803,7 @@ def grasp_cage_progress(
         torch.zeros_like(cage_metric),
     )
     env.phase_best_cage_distance = torch.where(
-        active,
+        env.task_phase == GRASP_PHASE,
         torch.minimum(env.phase_best_cage_distance, cage_metric),
         env.phase_best_cage_distance,
     )
@@ -582,34 +817,43 @@ def grasp_close_progress(
     min_box_contacts: int,
     max_base_tilt_angle: float,
     box_contact_sensor_names: tuple[str, ...],
+    left_box_contact_sensor_names: tuple[str, ...],
+    right_box_contact_sensor_names: tuple[str, ...],
+    min_box_contacts_per_hand: int = 1,
     min_cage_fingertips: int = 2,
+    min_cage_fingertips_per_hand: int = 1,
     max_pregrasp_object_displacement: float = 0.05,
     max_pregrasp_object_speed: float = 0.50,
     max_pregrasp_lift_height: float = 0.03,
+    min_base_height: float = 0.0,
+    feet_sensor_cfg: SceneEntityCfg | None = None,
+    min_foot_contact_force: float = 1.0,
     object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """One-way pre-grasp signal for accumulating real fingertip contacts.
 
     This deliberately uses Box-filtered force sensors rather than finger joint
-    angles: closing an empty hand earns nothing.  The score rises only as the
-    number of near, safe fingertip contacts increases, is capped at the strict
-    hold-contact count, and is latched so collision/release cycles cannot farm
-    it.  It does not alter the stable-contact or sparse-success predicate.
+    angles: closing an empty hand earns nothing.  The score is the lower of
+    the left and right hand contact scores, so it rises only when both hands
+    make near, safe contact.  It is latched so collision/release cycles cannot
+    farm it.
     """
     ensure_task_phase_buffers(env)
     robot: Articulation = env.scene[robot_cfg.name]
     obj: RigidObject = env.scene[object_cfg.name]
-    fingertip_distances, _ = _hand_object_distances(
+    left_fingertip_distances, right_fingertip_distances = _bimanual_fingertip_distances(
         env,
         robot,
         obj,
-        box_contact_sensor_names,
-        None,
+        left_box_contact_sensor_names,
+        right_box_contact_sensor_names,
         robot_cfg,
-        require_fingertips=True,
     )
-    cage_metric = _nth_nearest_fingertip_distance(fingertip_distances, min_cage_fingertips)
+    cage_metric = torch.maximum(
+        _nth_nearest_fingertip_distance(left_fingertip_distances, min_cage_fingertips_per_hand),
+        _nth_nearest_fingertip_distance(right_fingertip_distances, min_cage_fingertips_per_hand),
+    )
     safe = _safe_pregrasp_state(
         env,
         obj,
@@ -618,26 +862,174 @@ def grasp_close_progress(
         max_pregrasp_object_displacement,
         max_pregrasp_object_speed,
         max_pregrasp_lift_height,
+        min_base_height,
+        feet_sensor_cfg,
+        min_foot_contact_force,
     ) & (cage_metric <= cage_distance)
-    contact_count = _filtered_box_contact_count(env, box_contact_sensor_names, contact_force_threshold)
-    capped_contacts = torch.clamp(contact_count, max=max(1, min_box_contacts)).float()
-    contact_score = capped_contacts / max(1, min_box_contacts)
+    left_contact_count, right_contact_count = _bimanual_box_contact_counts(
+        env,
+        left_box_contact_sensor_names,
+        right_box_contact_sensor_names,
+        contact_force_threshold,
+    )
+    # Both hands must close on the Box before this score can reach one.
+    contact_score = torch.minimum(
+        torch.clamp(left_contact_count, max=max(1, min_box_contacts_per_hand)).float()
+        / max(1, min_box_contacts_per_hand),
+        torch.clamp(right_contact_count, max=max(1, min_box_contacts_per_hand)).float()
+        / max(1, min_box_contacts_per_hand),
+    )
     improvement = torch.where(
         safe,
         torch.clamp(contact_score - env.phase_best_close_contact_score, min=0.0),
         torch.zeros_like(contact_score),
     )
     env.phase_best_close_contact_score = torch.where(
-        safe,
+        env.task_phase == GRASP_PHASE,
         torch.maximum(env.phase_best_close_contact_score, contact_score),
         env.phase_best_close_contact_score,
     )
     return improvement / env.step_dt
 
 
+def grasp_pre_lift_progress(
+    env: ManagerBasedRLEnv,
+    pre_lift_height: float = 0.04,
+    cage_distance: float = 0.42,
+    box_contact_sensor_names: tuple[str, ...] = (),
+    left_box_contact_sensor_names: tuple[str, ...] = (),
+    right_box_contact_sensor_names: tuple[str, ...] = (),
+    hand_body_cfg: SceneEntityCfg | None = None,
+    contact_force_threshold: float = 0.25,
+    min_box_contacts: int = 2,
+    min_box_contacts_per_hand: int = 1,
+    min_cage_fingertips: int = 2,
+    min_cage_fingertips_per_hand: int = 1,
+    max_hand_object_distance: float = 0.36,
+    max_relative_object_speed: float = 0.30,
+    max_object_speed: float = 0.50,
+    max_horizontal_object_displacement: float = 0.05,
+    max_base_tilt_angle: float = 0.60,
+    min_base_height: float = 0.0,
+    feet_sensor_cfg: SceneEntityCfg | None = None,
+    min_foot_contact_force: float = 1.0,
+    pre_lift_escrow_duration_s: float = 0.25,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward a safe, low-force grasp for its first 0--``pre_lift_height`` of lift.
+
+    This is deliberately a bridge *before* the strict stable-contact predicate:
+    one Box-filtered fingertip from each hand must make low-force contact while
+    enclosing the object, and the hands, object, and base must all be physically quiet.  The
+    absolute-speed and horizontal-displacement gates make a tossed or pushed
+    Box ineligible even if it passes close to the hand.  Progress is a
+    per-episode monotonic potential, so a lift/drop/re-lift cycle cannot
+    repeatedly collect it.  The strict 1 N stable-contact/0.12 m transition is
+    untouched and uses its own lift potential.
+    """
+    ensure_task_phase_buffers(env)
+    robot: Articulation = env.scene[robot_cfg.name]
+    obj: RigidObject = env.scene[object_cfg.name]
+
+    left_fingertip_distances, right_fingertip_distances = _bimanual_fingertip_distances(
+        env,
+        robot,
+        obj,
+        left_box_contact_sensor_names,
+        right_box_contact_sensor_names,
+        robot_cfg,
+    )
+    _, hand_distance = _hand_object_distances(
+        env,
+        robot,
+        obj,
+        box_contact_sensor_names,
+        hand_body_cfg,
+        robot_cfg,
+        require_fingertips=True,
+    )
+    cage_metric = torch.maximum(
+        _nth_nearest_fingertip_distance(left_fingertip_distances, min_cage_fingertips_per_hand),
+        _nth_nearest_fingertip_distance(right_fingertip_distances, min_cage_fingertips_per_hand),
+    )
+    left_contact_count, right_contact_count = _bimanual_box_contact_counts(
+        env,
+        left_box_contact_sensor_names,
+        right_box_contact_sensor_names,
+        contact_force_threshold,
+    )
+    contact_count = _filtered_box_contact_count(env, box_contact_sensor_names, contact_force_threshold)
+
+    lift_height = obj.data.root_pos_w[:, 2] - env.phase_object_start_height
+    relative_speed = torch.linalg.vector_norm(obj.data.root_lin_vel_w - robot.data.root_lin_vel_w, dim=-1)
+    object_speed = torch.linalg.vector_norm(obj.data.root_lin_vel_w, dim=-1)
+    horizontal_displacement = torch.linalg.vector_norm(
+        obj.data.root_pos_w[:, :2] - env.phase_object_start_pos[:, :2], dim=-1
+    )
+    safe_low_force_grasp = (
+        (contact_count >= min_box_contacts)
+        & (left_contact_count >= min_box_contacts_per_hand)
+        & (right_contact_count >= min_box_contacts_per_hand)
+        & (cage_metric <= cage_distance)
+        & (hand_distance <= max_hand_object_distance)
+        & (relative_speed <= max_relative_object_speed)
+        & (object_speed <= max_object_speed)
+        & (horizontal_displacement <= max_horizontal_object_displacement)
+        & grasp_stance_valid(
+            env,
+            max_base_tilt_angle,
+            min_base_height,
+            feet_sensor_cfg,
+            min_foot_contact_force,
+            robot_cfg,
+        )
+    )
+    lift_fraction = torch.clamp(lift_height / max(pre_lift_height, 1.0e-6), min=0.0, max=1.0)
+    improvement = torch.clamp(lift_fraction - env.phase_best_pre_lift_fraction, min=0.0)
+    # Burn all uplift made in an invalid GRASP state.  Only the progress seen
+    # during a continuously safe low-force grasp can enter the escrow.
+    env.phase_best_pre_lift_fraction = torch.where(
+        env.task_phase == GRASP_PHASE,
+        torch.maximum(env.phase_best_pre_lift_fraction, lift_fraction),
+        env.phase_best_pre_lift_fraction,
+    )
+    # Strict contact normally becomes true after 0.10 s.  An escrow already
+    # opened before that point may keep maturing, but it cannot be started
+    # after strict contact takes over the later lift reward.
+    can_start_escrow = safe_low_force_grasp & ~env.phase_stable_contact
+    can_continue_escrow = safe_low_force_grasp & (env.phase_pre_lift_escrow_steps > 0)
+    escrow_active = can_start_escrow | can_continue_escrow
+    escrow_steps = torch.where(
+        escrow_active,
+        env.phase_pre_lift_escrow_steps + 1,
+        torch.zeros_like(env.phase_pre_lift_escrow_steps),
+    )
+    escrow_value = torch.where(
+        escrow_active,
+        env.phase_pre_lift_escrow + improvement,
+        torch.zeros_like(env.phase_pre_lift_escrow),
+    )
+    required_steps = max(1, math.ceil(pre_lift_escrow_duration_s / env.step_dt))
+    payout_ready = escrow_active & (escrow_steps >= required_steps)
+    payout = torch.where(payout_ready, escrow_value, torch.zeros_like(escrow_value))
+    env.phase_pre_lift_escrow = torch.where(payout_ready, torch.zeros_like(escrow_value), escrow_value)
+    env.phase_pre_lift_escrow_steps = torch.where(
+        payout_ready,
+        torch.zeros_like(escrow_steps),
+        escrow_steps,
+    )
+    return payout / env.step_dt
+
+
 def grasp_box_contact_reward(
     env: ManagerBasedRLEnv,
     contact_reward: float,
+    max_base_tilt_angle: float,
+    min_base_height: float,
+    feet_sensor_cfg: SceneEntityCfg,
+    min_foot_contact_force: float = 1.0,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """One-time reward for a stable, upright multi-fingertip contact qualification."""
     ensure_task_phase_buffers(env)
@@ -645,6 +1037,14 @@ def grasp_box_contact_reward(
         (env.task_phase == GRASP_PHASE)
         & env.phase_stable_contact
         & ~env.phase_contact_reward_claimed
+        & grasp_stance_valid(
+            env,
+            max_base_tilt_angle,
+            min_base_height,
+            feet_sensor_cfg,
+            min_foot_contact_force,
+            robot_cfg,
+        )
     )
     env.phase_contact_reward_claimed[qualified] = True
     # RewardManager multiplies by dt.  Divide here so the configured value is
@@ -655,7 +1055,12 @@ def grasp_box_contact_reward(
 def grasp_lift_progress(
     env: ManagerBasedRLEnv,
     lift_height: float,
+    max_base_tilt_angle: float,
+    min_base_height: float,
+    feet_sensor_cfg: SceneEntityCfg,
+    min_foot_contact_force: float = 1.0,
     object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """Monotonic lift progress after stable upright multi-fingertip contact.
 
@@ -666,17 +1071,32 @@ def grasp_lift_progress(
     ensure_task_phase_buffers(env)
     obj: RigidObject = env.scene[object_cfg.name]
     lift_fraction = torch.clamp((obj.data.root_pos_w[:, 2] - env.phase_object_start_height) / lift_height, 0.0, 1.0)
-    active = (
-        ((env.task_phase == GRASP_PHASE) | (env.task_phase == CARRY_PHASE))
+    grasp_active = (
+        (env.task_phase == GRASP_PHASE)
         & env.phase_stable_contact
+        & grasp_stance_valid(
+            env,
+            max_base_tilt_angle,
+            min_base_height,
+            feet_sensor_cfg,
+            min_foot_contact_force,
+            robot_cfg,
+        )
     )
+    # CARRY keeps its former predicate: normal walking may briefly use one
+    # foot and must not make a valid hold/lift reward flicker off.
+    carry_active = (env.task_phase == CARRY_PHASE) & env.phase_stable_contact
+    active = grasp_active | carry_active
     improvement = torch.where(
         active,
         torch.clamp(lift_fraction - env.phase_best_lift_fraction, min=0.0),
         torch.zeros_like(lift_fraction),
     )
+    # GRASP lift made while unsupported is intentionally not recoverable as a
+    # later reward.  CARRY retains its original, stable-hold-only potential.
+    update_best = (env.task_phase == GRASP_PHASE) | carry_active
     env.phase_best_lift_fraction = torch.where(
-        active,
+        update_best,
         torch.maximum(env.phase_best_lift_fraction, lift_fraction),
         env.phase_best_lift_fraction,
     )
@@ -684,7 +1104,12 @@ def grasp_lift_progress(
 
 
 def carry_hold_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Reward stable Box-contact hold only while navigating in the carry phase."""
+    """Reward a stable bimanual Box hold only while navigating in CARRY.
+
+    ``phase_stable_hold`` is bimanual because the phase predicate updates it
+    from one Box-filtered fingertip contact on each hand.  A one-handed grasp
+    therefore receives neither this survival reward nor the navigation terms.
+    """
     ensure_task_phase_buffers(env)
     return ((env.task_phase == CARRY_PHASE) & env.phase_stable_hold).float()
 
@@ -719,7 +1144,7 @@ def place_bin_progress(
     """Monotonic object-to-bin progress after staging, before final placement."""
     ensure_task_phase_buffers(env)
     obj: RigidObject = env.scene[object_cfg.name]
-    target_pos_w = env.scene.env_origins + torch.tensor(bin_target_pos_e, device=env.device)
+    target_pos_w = environment_point_w(env, bin_target_pos_e, "bin_center_e")
     distance = torch.linalg.vector_norm(obj.data.root_pos_w - target_pos_w, dim=-1)
     robot: Articulation = env.scene[robot_cfg.name]
     base_tilt = torch.acos(torch.clamp(-robot.data.projected_gravity_b[:, 2], -1.0, 1.0))

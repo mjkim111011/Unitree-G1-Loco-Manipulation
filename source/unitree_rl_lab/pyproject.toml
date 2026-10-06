@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools", "wheel", "toml"]
+requires = ["setuptools==80.10.2", "wheel==0.45.1", "toml==0.10.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,9 +7,11 @@ name = "unitree_rl_lab"
 version = "0.2.1"
 description = "Reinforcement Learning Lab for Unitree Robots."
 dependencies = [
-    "argcomplete",
+    "argcomplete==3.6.3",
+    "psutil==5.9.8",
+    "qrcode==7.4.2",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.12"
 license = { text = "Apache 2.0" }
 authors = [
     { name = "Unitree Robotics" }

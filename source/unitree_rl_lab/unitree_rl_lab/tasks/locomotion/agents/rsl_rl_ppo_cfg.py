@@ -4,7 +4,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from isaaclab.utils import configclass
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+    RslRlRndCfg,
+)
 
 
 @configclass
@@ -33,4 +38,51 @@ class BasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+    )
+
+
+@configclass
+class BoxPickPlacePPORunnerCfg(BasePPORunnerCfg):
+    """PPO with paper-style Random Network Distillation for package exploration."""
+
+    experiment_name = "g1_43dof_box_pick_place_rnd"
+    obs_groups = {
+        "policy": ["policy_history", "policy_current"],
+        "critic": ["critic_history", "critic_current"],
+        "rnd_state": ["rnd_state"],
+    }
+    # A scratch 43-DoF humanoid policy must not begin with 0.25-rad-scale
+    # random targets on every joint.  Keep exploration, but start at 0.0625 rad
+    # after the action scale and reduce the entropy pressure that had grown the
+    # learned standard deviation into a falling policy.
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=0.25,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.002,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-3,
+        schedule="adaptive",
+        gamma=0.998,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+        rnd_cfg=RslRlRndCfg(
+            # resolve_rnd_config multiplies this by dt.  10 -> 0.2 per step,
+            # so curiosity stays auxiliary to the task/safety signal.
+            weight=10.0,
+            state_normalization=True,
+            reward_normalization=True,
+            learning_rate=1.0e-3,
+            num_outputs=16,
+            predictor_hidden_dims=[64, 64],
+            target_hidden_dims=[64, 64],
+        ),
     )

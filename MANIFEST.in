@@ -1,0 +1,16 @@
+include LICENCE README.md .python-version requirements.txt
+include G1_43DOF_LOCO_MANIPULATION.md G1_43DOF_LOCO_MANIPULATION_FRAMEWORK.md
+include README_G1_43DOF_LOCO_MANIPULATION_DETAILED.md README_G1_43DOF_PROJECT_STATUS.md
+recursive-include source/unitree_rl_lab *.py *.toml *.csv *.yaml *.yml *.json *.urdf
+recursive-include scripts *.py *.sh *.md
+recursive-include packaging *.py *.sh *.json *.md *.patch *.txt
+exclude packaging/README.md
+recursive-include requirements *.txt
+recursive-include tests *.py
+prune data
+prune external
+prune handoff
+prune logs
+prune packaging/validation
+prune .venv
+global-exclude __pycache__ *.pyc *.pt *.hdf5 *.h5 *.mp4

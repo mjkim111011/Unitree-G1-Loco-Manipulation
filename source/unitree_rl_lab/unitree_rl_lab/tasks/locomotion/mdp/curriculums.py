@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
+
+import torch
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv

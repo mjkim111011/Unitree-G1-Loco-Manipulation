@@ -3,7 +3,7 @@
 import os
 import toml
 
-from setuptools import setup
+from setuptools import find_namespace_packages, setup
 
 # Obtain the extension data from the extension.toml file
 EXTENSION_PATH = os.path.dirname(os.path.realpath(__file__))
@@ -12,14 +12,17 @@ EXTENSION_TOML_DATA = toml.load(os.path.join(EXTENSION_PATH, "config", "extensio
 
 # Minimum dependencies required prior to installation
 INSTALL_REQUIRES = [
-    # NOTE: Add dependencies
-    "psutil",
+    "argcomplete==3.6.3",
+    "psutil==5.9.8",
+    "qrcode==7.4.2",
 ]
 
 # Installation operation
 setup(
     name="unitree_rl_lab",
-    packages=["unitree_rl_lab"],
+    packages=find_namespace_packages(where=EXTENSION_PATH, include=["unitree_rl_lab*"]),
+    package_dir={"": "."},
+    package_data={"unitree_rl_lab": ["**/*.csv", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.toml", "**/*.urdf"]},
     author=EXTENSION_TOML_DATA["package"]["author"],
     maintainer=EXTENSION_TOML_DATA["package"]["maintainer"],
     url=EXTENSION_TOML_DATA["package"]["repository"],
@@ -29,11 +32,10 @@ setup(
     install_requires=INSTALL_REQUIRES,
     license="Apache 2.0",
     include_package_data=True,
-    python_requires=">=3.10",
+    python_requires=">=3.11,<3.12",
     classifiers=[
         "Natural Language :: English",
-        "Programming Language :: Python :: 3.10",
-        "Isaac Sim :: 4.5.0",
+        "Programming Language :: Python :: 3.11",
     ],
     zip_safe=False,
 )

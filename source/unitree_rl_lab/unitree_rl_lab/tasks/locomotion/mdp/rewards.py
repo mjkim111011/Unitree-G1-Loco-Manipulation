@@ -4,12 +4,16 @@ import torch
 from typing import TYPE_CHECKING
 
 try:
-    from isaaclab.utils.math import quat_apply_inverse
+    from isaaclab.utils.math import quat_apply_inverse, yaw_quat
 except ImportError:
     from isaaclab.utils.math import quat_rotate_inverse as quat_apply_inverse
+    from isaaclab.utils.math import yaw_quat
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
+
+from .task_phases import CARRY_PHASE, FULL_TASK_PHASE, ensure_task_phase_buffers
+from .workspace import environment_point_w
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -223,3 +227,186 @@ def joint_mirror(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, mirror_joint
         )
     reward *= 1 / len(mirror_joints) if len(mirror_joints) > 0 else 0
     return reward
+
+
+"""
+Object carry rewards.
+"""
+
+
+def object_position_in_robot_frame_exp(
+    env: ManagerBasedRLEnv,
+    target_pos_b: tuple[float, float, float],
+    std: float,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """Reward the box for staying near a target pose expressed in the robot root frame."""
+    robot: RigidObject = env.scene[robot_cfg.name]
+    obj: RigidObject = env.scene[object_cfg.name]
+    obj_pos_b = quat_apply_inverse(robot.data.root_quat_w, obj.data.root_pos_w - robot.data.root_pos_w)
+    target_pos_b = torch.tensor(target_pos_b, device=env.device, dtype=torch.float32)
+    error = torch.sum(torch.square(obj_pos_b - target_pos_b), dim=-1)
+    return torch.exp(-error / std**2)
+
+
+def object_height_above(
+    env: ManagerBasedRLEnv,
+    minimum_height: float,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """Reward the box for staying above a minimum world height."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    return (obj.data.root_pos_w[:, 2] > minimum_height).float()
+
+
+def object_lin_vel_relative_l2(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """Penalize object linear velocity relative to the robot root."""
+    robot: RigidObject = env.scene[robot_cfg.name]
+    obj: RigidObject = env.scene[object_cfg.name]
+    rel_vel_b = quat_apply_inverse(robot.data.root_quat_w, obj.data.root_lin_vel_w - robot.data.root_lin_vel_w)
+    return torch.sum(torch.square(rel_vel_b), dim=-1)
+
+
+def hand_object_distance_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    hand_body_cfg: SceneEntityCfg,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """Reward selected hand bodies for staying close to the box."""
+    robot: Articulation = env.scene[hand_body_cfg.name]
+    obj: RigidObject = env.scene[object_cfg.name]
+    hand_pos_w = robot.data.body_pos_w[:, hand_body_cfg.body_ids, :]
+    distance = torch.linalg.norm(hand_pos_w - obj.data.root_pos_w.unsqueeze(1), dim=-1).mean(dim=-1)
+    return torch.exp(-distance / std)
+
+
+def lin_vel_command_error_l2(
+    env: ManagerBasedRLEnv,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize xy velocity tracking error in the yaw-aligned robot frame."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    vel_yaw = quat_apply_inverse(yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3])
+    command_xy = env.command_manager.get_command(command_name)[:, :2]
+    return torch.sum(torch.square(command_xy - vel_yaw[:, :2]), dim=-1)
+
+
+def robot_object_distance_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """Reward bringing the robot base close to the object in the horizontal plane."""
+    robot: RigidObject = env.scene[robot_cfg.name]
+    obj: RigidObject = env.scene[object_cfg.name]
+    distance_xy = torch.linalg.norm(obj.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=-1)
+    return torch.exp(-distance_xy / std)
+
+
+def object_target_distance_exp(
+    env: ManagerBasedRLEnv,
+    target_pos_e: tuple[float, float, float],
+    std: float,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """Reward moving an object toward an environment-relative target point."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    target_pos_w = environment_point_w(env, target_pos_e, "bin_center_e")
+    distance = torch.linalg.norm(obj.data.root_pos_w - target_pos_w, dim=-1)
+    return torch.exp(-distance / std)
+
+
+def object_lift_clearance(
+    env: ManagerBasedRLEnv,
+    table_surface_height: float,
+    minimum_clearance: float,
+    target_clearance: float,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """Dense lift progress above the fixed-per-environment table surface."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    height = obj.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    if hasattr(env, "table_surface_height"):
+        support_height = env.table_surface_height
+    else:
+        support_height = torch.full_like(height, table_surface_height)
+    clearance = height - support_height
+    return torch.clamp(
+        (clearance - minimum_clearance) / (target_clearance - minimum_clearance),
+        min=0.0,
+        max=1.0,
+    )
+
+
+def object_in_receptacle(
+    env: ManagerBasedRLEnv,
+    target_pos_e: tuple[float, float, float],
+    inner_half_extents: tuple[float, float, float],
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """Return one when the object center lies inside the open target box."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    target_pos_w = environment_point_w(env, target_pos_e, "bin_center_e")
+    half_extents = torch.tensor(inner_half_extents, device=env.device)
+    return torch.all(torch.abs(obj.data.root_pos_w - target_pos_w) < half_extents, dim=-1).float()
+
+
+def object_lin_vel_w_l2(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """Penalize large package velocities as a task-independent shaping term."""
+    obj: RigidObject = env.scene[object_cfg.name]
+    return torch.sum(torch.square(obj.data.root_lin_vel_w), dim=-1)
+
+
+def phase_goal_velocity_tracking_exp(
+    env: ManagerBasedRLEnv,
+    carry_target_pos_e: tuple[float, float, float],
+    maximum_speed: float,
+    slow_down_distance: float,
+    std: float,
+    carried_object_height: float,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Track a modest goal-directed velocity without adding a dense position reward."""
+    ensure_task_phase_buffers(env)
+    robot: RigidObject = env.scene[robot_cfg.name]
+    obj: RigidObject = env.scene[object_cfg.name]
+
+    carry_target_w = environment_point_w(env, carry_target_pos_e, "bin_center_e")
+    object_height_e = obj.data.root_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    object_near_robot = (
+        torch.linalg.norm(obj.data.root_pos_w[:, :2] - robot.data.root_pos_w[:, :2], dim=-1) < 0.75
+    )
+    carrying_in_full_task = (
+        (env.task_phase == FULL_TASK_PHASE)
+        & (object_height_e > carried_object_height)
+        & object_near_robot
+    )
+    navigate_to_carry_target = (env.task_phase == CARRY_PHASE) | carrying_in_full_task
+    goal_xy_w = torch.where(
+        navigate_to_carry_target.unsqueeze(-1),
+        carry_target_w[:, :2],
+        obj.data.root_pos_w[:, :2],
+    )
+
+    goal_delta = goal_xy_w - robot.data.root_pos_w[:, :2]
+    goal_distance = torch.linalg.norm(goal_delta, dim=-1)
+    goal_direction = goal_delta / torch.clamp(goal_distance.unsqueeze(-1), min=1.0e-6)
+    desired_speed = maximum_speed * torch.clamp(goal_distance / slow_down_distance, max=1.0)
+    desired_velocity_w = goal_direction * desired_speed.unsqueeze(-1)
+    velocity_error = torch.sum(
+        torch.square(robot.data.root_lin_vel_w[:, :2] - desired_velocity_w),
+        dim=-1,
+    )
+    return torch.exp(-velocity_error / std**2)

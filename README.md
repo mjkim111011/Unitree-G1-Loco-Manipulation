@@ -10,7 +10,10 @@
 
 This project provides a set of reinforcement learning environments for Unitree robots, built on top of [IsaacLab](https://github.com/isaac-sim/IsaacLab).
 
-Currently supports Unitree **Go2**, **H1** and **G1-29dof** robots.
+Currently supports Unitree **Go2**, **H1**, **G1-29dof**, and the G1
+**43-DOF Box manipulation** environment/policy pipeline. See the
+[43-DOF teacher and BC pipeline](scripts/teacher/README.md) for the production
+data, DAgger, physical certification, carry/place, and FSM workflow.
 
 <div align="center">
 
@@ -21,6 +24,57 @@ Currently supports Unitree **Go2**, **H1** and **G1-29dof** robots.
 </div>
 
 ## Installation
+
+For the version-pinned **G1 43-DOF loco-manipulation research workspace**, use
+[the automatic installer](packaging/bootstrap.sh). It separates the Python
+**3.11.14** simulation/training environment from the Python **3.12.12** Arena
+WBC worker. Source commits and compatibility patches are pinned in
+[sources.json](packaging/sources.json).
+
+Requirements: Linux x86_64 (GLIBC >= 2.35), a compatible NVIDIA RTX GPU/driver,
+Git/Git LFS, build tools, FFmpeg, and graphics libraries. Use a fresh terminal
+without ROS or an older Isaac Gym environment activated. Review the NVIDIA
+licenses before passing `--accept-eula`.
+
+```bash
+# Run inside the cloned repository. The installer creates .venv and external/.
+python3 -m pip install --user uv==0.10.0
+export PATH="$HOME/.local/bin:$PATH"
+bash packaging/bootstrap.sh --dry-run
+bash packaging/bootstrap.sh --accept-eula
+source packaging/activate.sh
+unitree-lab doctor --full --assets
+```
+
+The installer refuses existing environments by default. Use
+`bash packaging/bootstrap.sh --resume --accept-eula` only to resume this
+workspace's interrupted installation. It does not modify the historical Conda
+environments. GPU drivers and training data/checkpoints are not installed by pip.
+
+- [Installation requirements](requirements.txt) and [resolved dependency pins](requirements/main.lock.txt).
+- [Original training environment versions](requirements/main.snapshot.txt).
+- [Original Arena environment versions](requirements/arena.snapshot.txt).
+- [Portable VS Code launch configurations](packaging/vscode.launch.json): copy
+  to `.vscode/launch.json` in a new clone if that file does not already exist.
+
+Snapshots record the original environments; they are not installable locks.
+The installer applies the documented compatibility versions instead of merging
+the two Python environments. Its results can be inspected in
+[environment validation](packaging/VALIDATION.md).
+
+## G1 43-DOF research documentation
+
+- [Task and complete pipeline](G1_43DOF_LOCO_MANIPULATION.md).
+- [Environment, Teacher collection, Student learning, and FSM framework](G1_43DOF_LOCO_MANIPULATION_FRAMEWORK.md).
+- [Detailed technical explanation](README_G1_43DOF_LOCO_MANIPULATION_DETAILED.md).
+- [Project progress report](README_G1_43DOF_PROJECT_STATUS.md).
+
+These documents include historical experiment results; implementation does not
+imply that the entire Student task is certified for all workspace conditions.
+
+## Upstream task installation
+
+The generic installation instructions below are retained for upstream robot tasks.
 
 - Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
 - Install the Unitree RL IsaacLab standalone environments.

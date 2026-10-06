@@ -1,0 +1,328 @@
+diff --git a/source/isaaclab/isaaclab/envs/manager_based_env.py b/source/isaaclab/isaaclab/envs/manager_based_env.py
+index 3ff6d291c0a..1a2df6c3786 100644
+--- a/source/isaaclab/isaaclab/envs/manager_based_env.py
++++ b/source/isaaclab/isaaclab/envs/manager_based_env.py
+@@ -98,16 +98,19 @@ class ManagerBasedEnv:
+             logger.warning("Seed not set for the environment. The environment creation may not be deterministic.")
+ 
+         # create a simulation context to control the simulator
+-        if SimulationContext.instance() is None:
++        sim_instance = SimulationContext.instance()
++        if sim_instance is None:
+             # the type-annotation is required to avoid a type-checking error
+             # since it gets confused with Isaac Sim's SimulationContext class
+             self.sim: SimulationContext = SimulationContext(self.cfg.sim)
+         else:
+-            # simulation context should only be created before the environment
+-            # when in extension mode
+-            if not builtins.ISAAC_LAUNCHED_FROM_TERMINAL:
+-                raise RuntimeError("Simulation context already exists. Cannot create a new one.")
+-            self.sim: SimulationContext = SimulationContext.instance()
++            logger.warning(
++                "Simulation context already exists. Reusing the existing context for an additional environment."
++            )
++            self.sim: SimulationContext = sim_instance
++        # When creating additional environments while simulation is already playing,
++        # defer manager term resolution until after scene handles are available.
++        self._defer_manager_term_resolution = sim_instance is not None and self.sim.is_playing()
+ 
+         # make sure torch is running on the correct device
+         if "cuda" in self.device:
+@@ -319,6 +322,11 @@ class ManagerBasedEnv:
+         # -- observation manager
+         self.observation_manager = ObservationManager(self.cfg.observations, self)
+         print("[INFO] Observation Manager:", self.observation_manager)
++        # force one-time resolution for managers that deferred scene entity parsing during construction
++        self._resolve_manager_terms_if_needed(self.event_manager)
++        self._resolve_manager_terms_if_needed(self.recorder_manager)
++        self._resolve_manager_terms_if_needed(self.action_manager)
++        self._resolve_manager_terms_if_needed(self.observation_manager)
+ 
+         # perform events at the start of the simulation
+         # in-case a child implementation creates other managers, the randomization should happen
+@@ -326,6 +334,12 @@ class ManagerBasedEnv:
+         if self.__class__ == ManagerBasedEnv and "startup" in self.event_manager.available_modes:
+             self.event_manager.apply(mode="startup")
+ 
++    @staticmethod
++    def _resolve_manager_terms_if_needed(manager):
++        if getattr(manager, "_is_scene_entities_resolved", True):
++            return
++        manager._resolve_terms_callback(event=None)
++
+     def setup_manager_visualizers(self):
+         """Creates live visualizers for manager terms."""
+ 
+diff --git a/source/isaaclab/isaaclab/managers/manager_base.py b/source/isaaclab/isaaclab/managers/manager_base.py
+index 158c713abfa..432481142f3 100644
+--- a/source/isaaclab/isaaclab/managers/manager_base.py
++++ b/source/isaaclab/isaaclab/managers/manager_base.py
+@@ -149,9 +149,11 @@ class ManagerBase(ABC):
+         self.cfg = copy.deepcopy(cfg)
+         self._env = env
+ 
+-        # flag for whether the scene entities have been resolved
+-        # if sim is playing, we resolve the scene entities directly while preparing the terms
+-        self._is_scene_entities_resolved = self._env.sim.is_playing()
++        # flag for whether the scene entities have been resolved.
++        # if sim is playing, we usually resolve scene entities directly while preparing terms.
++        # however, some environments may request deferred resolution while they are still under construction.
++        defer_scene_resolution = getattr(self._env, "_defer_manager_term_resolution", False)
++        self._is_scene_entities_resolved = self._env.sim.is_playing() and not defer_scene_resolution
+ 
+         # if the simulation is not playing, we use callbacks to trigger the resolution of the scene
+         # entities configuration. this is needed for cases where the manager is created after the
+@@ -287,6 +289,11 @@ class ManagerBase(ABC):
+             # check for non config
+             if term_cfg is None:
+                 continue
++            # Some manager configs include auxiliary settings alongside term configs
++            # (for example recorder dataset export settings). Only term configs should
++            # be resolved against the live scene.
++            if not isinstance(term_cfg, ManagerTermBaseCfg):
++                continue
+             # process attributes at runtime
+             # these properties are only resolvable once the simulation starts playing
+             self._process_term_cfg_at_play(term_name, term_cfg)
+@@ -374,8 +381,9 @@ class ManagerBase(ABC):
+                 )
+ 
+         # process attributes at runtime
+-        # these properties are only resolvable once the simulation starts playing
+-        if self._env.sim.is_playing():
++        # these properties are only resolvable once the simulation starts playing.
++        # when deferred resolution is requested, postpone until `_resolve_terms_callback`.
++        if self._env.sim.is_playing() and self._is_scene_entities_resolved:
+             self._process_term_cfg_at_play(term_name, term_cfg)
+ 
+     def _process_term_cfg_at_play(self, term_name: str, term_cfg: ManagerTermBaseCfg):
+diff --git a/source/isaaclab/isaaclab/scene/interactive_scene.py b/source/isaaclab/isaaclab/scene/interactive_scene.py
+index 46e5895687a..ab9af381cfc 100644
+--- a/source/isaaclab/isaaclab/scene/interactive_scene.py
++++ b/source/isaaclab/isaaclab/scene/interactive_scene.py
+@@ -351,7 +351,7 @@ class InteractiveScene:
+         The environments are present w.r.t. this namespace under "env_{N}" prim,
+         where N is a natural number.
+         """
+-        return "/World/envs"
++        return self.cfg.env_ns
+ 
+     @property
+     def env_regex_ns(self) -> str:
+diff --git a/source/isaaclab/isaaclab/scene/interactive_scene_cfg.py b/source/isaaclab/isaaclab/scene/interactive_scene_cfg.py
+index f4328324152..473ef8c8910 100644
+--- a/source/isaaclab/isaaclab/scene/interactive_scene_cfg.py
++++ b/source/isaaclab/isaaclab/scene/interactive_scene_cfg.py
+@@ -70,6 +70,12 @@ class InteractiveSceneCfg:
+     num_envs: int = MISSING
+     """Number of environment instances handled by the scene."""
+ 
++    env_ns: str = "/World/envs"
++    """Namespace in which all environments are created.
++
++    The environments are created as ``{env_ns}/env_{N}``, where N is a natural number.
++    """
++
+     env_spacing: float = MISSING
+     """Spacing between environments.
+ 
+diff --git a/source/isaaclab/isaaclab/utils/configclass.py b/source/isaaclab/isaaclab/utils/configclass.py
+index e46280a61cc..c35b9a04444 100644
+--- a/source/isaaclab/isaaclab/utils/configclass.py
++++ b/source/isaaclab/isaaclab/utils/configclass.py
+@@ -259,36 +259,75 @@ def _validate(obj: object, prefix: str = "") -> list[str]:
+     Raises:
+         TypeError: When the object is not a valid configuration object.
+     """
+-    missing_fields = []
++    active_object_ids: set[int] = set()
++
++    def _validate_impl(current_obj: object, current_prefix: str) -> list[str]:
++        missing_fields = []
++
++        if type(current_obj).__name__ == "MeshConverterCfg":
++            return missing_fields
++
++        if type(current_obj) is type(MISSING):
++            missing_fields.append(current_prefix)
++            return missing_fields
++
++        # Config fields such as `class_type` intentionally store class objects.
++        # We only need to validate that they are not `MISSING`, not recurse into class internals.
++        if isinstance(current_obj, type):
++            return missing_fields
++
++        if isinstance(current_obj, (list, tuple)):
++            current_obj_id = id(current_obj)
++            if current_obj_id in active_object_ids:
++                return missing_fields
++            active_object_ids.add(current_obj_id)
++            try:
++                for index, item in enumerate(current_obj):
++                    next_prefix = f"{current_prefix}[{index}]"
++                    missing_fields.extend(_validate_impl(item, next_prefix))
++            finally:
++                active_object_ids.remove(current_obj_id)
++            return missing_fields
++
++        if isinstance(current_obj, dict):
++            current_obj_id = id(current_obj)
++            if current_obj_id in active_object_ids:
++                return missing_fields
++            active_object_ids.add(current_obj_id)
++            try:
++                # Convert any non-string keys to strings to allow validation of dict with non-string keys
++                if any(not isinstance(key, str) for key in current_obj.keys()):
++                    obj_dict = {str(key): value for key, value in current_obj.items()}
++                else:
++                    obj_dict = current_obj
++                for key, value in obj_dict.items():
++                    next_prefix = f"{current_prefix}.{key}" if current_prefix else key
++                    missing_fields.extend(_validate_impl(value, next_prefix))
++            finally:
++                active_object_ids.remove(current_obj_id)
++            return missing_fields
++
++        if not hasattr(current_obj, "__dict__"):
++            return missing_fields
++
++        current_obj_id = id(current_obj)
++        if current_obj_id in active_object_ids:
++            return missing_fields
++
++        active_object_ids.add(current_obj_id)
++        try:
++            for key, value in current_obj.__dict__.items():
++                # disregard builtin attributes
++                if key.startswith("__"):
++                    continue
++                next_prefix = f"{current_prefix}.{key}" if current_prefix else key
++                missing_fields.extend(_validate_impl(value, next_prefix))
++        finally:
++            active_object_ids.remove(current_obj_id)
+ 
+-    if type(obj).__name__ == "MeshConverterCfg":
+         return missing_fields
+ 
+-    if type(obj) is type(MISSING):
+-        missing_fields.append(prefix)
+-        return missing_fields
+-    elif isinstance(obj, (list, tuple)):
+-        for index, item in enumerate(obj):
+-            current_path = f"{prefix}[{index}]"
+-            missing_fields.extend(_validate(item, prefix=current_path))
+-        return missing_fields
+-    elif isinstance(obj, dict):
+-        # Convert any non-string keys to strings to allow validation of dict with non-string keys
+-        if any(not isinstance(key, str) for key in obj.keys()):
+-            obj_dict = {str(key): value for key, value in obj.items()}
+-        else:
+-            obj_dict = obj
+-    elif hasattr(obj, "__dict__"):
+-        obj_dict = obj.__dict__
+-    else:
+-        return missing_fields
+-
+-    for key, value in obj_dict.items():
+-        # disregard builtin attributes
+-        if key.startswith("__"):
+-            continue
+-        current_path = f"{prefix}.{key}" if prefix else key
+-        missing_fields.extend(_validate(value, prefix=current_path))
++    missing_fields = _validate_impl(obj, prefix)
+ 
+     # raise an error only once at the top-level call
+     if prefix == "" and missing_fields:
+diff --git a/source/isaaclab/isaaclab/utils/noise/__init__.py b/source/isaaclab/isaaclab/utils/noise/__init__.py
+index 7f91067fd00..0f86b9bd233 100644
+--- a/source/isaaclab/isaaclab/utils/noise/__init__.py
++++ b/source/isaaclab/isaaclab/utils/noise/__init__.py
+@@ -26,8 +26,8 @@ Usage:
+ 
+ """
+ from .noise_cfg import NoiseCfg  # noqa: F401
+-from .noise_cfg import ConstantNoiseCfg, GaussianNoiseCfg, NoiseModelCfg, NoiseModelWithAdditiveBiasCfg, UniformNoiseCfg
+-from .noise_model import NoiseModel, NoiseModelWithAdditiveBias, constant_noise, gaussian_noise, uniform_noise
++from .noise_cfg import ConstantNoiseCfg, GaussianNoiseCfg, NoiseModelCfg, NoiseModelWithAdditiveBiasCfg, UniformNoiseCfg, D435iDepthNoiseCfg
++from .noise_model import NoiseModel, NoiseModelWithAdditiveBias, constant_noise, gaussian_noise, uniform_noise, d435i_depth_noise
+ 
+ # Backward compatibility
+ ConstantBiasNoiseCfg = ConstantNoiseCfg
+diff --git a/source/isaaclab/isaaclab/utils/noise/noise_cfg.py b/source/isaaclab/isaaclab/utils/noise/noise_cfg.py
+index b3275643fd2..903747aad5e 100644
+--- a/source/isaaclab/isaaclab/utils/noise/noise_cfg.py
++++ b/source/isaaclab/isaaclab/utils/noise/noise_cfg.py
+@@ -110,3 +110,20 @@ class NoiseModelWithAdditiveBiasCfg(NoiseModelCfg):
+ 
+     Defaults to True.
+     """
++
++
++@configclass
++class D435iDepthNoiseCfg(NoiseCfg):
++    """Intel RealSense D435i IR 센서(91.2도 HFOV) 기준 Depth 노이즈 설정."""
++    
++    func = noise_model.d435i_depth_noise
++    
++    # 80x60 해상도 + IR Wide HFOV(91.2도) 기준 픽셀 초점 거리
++    f_pixel: float = 39.18    
++    baseline: float = 0.05    # 50mm 베이스라인 (meters)
++    subpixel: float = 0.1     # 서브픽셀 정밀도
++    
++    # 에지 및 홀 설정
++    edge_std_scale: float = 0.5  # 에지에서 노이즈가 증폭되는 강도
++    hole_prob_base: float = 0.02 # 기본 데이터 결손 확률
++    hole_prob_z_limit: float = 5.0  # 결손 확률이 급증하는 임계 거리 (meters)
+\ No newline at end of file
+diff --git a/source/isaaclab/isaaclab/utils/noise/noise_model.py b/source/isaaclab/isaaclab/utils/noise/noise_model.py
+index 78b93c9f099..da71ba4c1e4 100644
+--- a/source/isaaclab/isaaclab/utils/noise/noise_model.py
++++ b/source/isaaclab/isaaclab/utils/noise/noise_model.py
+@@ -99,6 +99,41 @@ def gaussian_noise(data: torch.Tensor, cfg: noise_cfg.GaussianNoiseCfg) -> torch
+         raise ValueError(f"Unknown operation in noise: {cfg.operation}")
+ 
+ 
++
++def d435i_depth_noise(data: torch.Tensor, cfg: noise_cfg.D435iDepthNoiseCfg) -> torch.Tensor:
++    """수식 D_noisy = M_hole * [D_clean + N(0, sigma_total)] 구현 (80x60 해상도)."""
++    
++    # 1. 거리 기반 노이즈 계산 (z^2 / (f*B) * subpixel)
++    # 저해상도에서는 f_pixel이 작아지므로 분모가 작아져 노이즈가 상대적으로 커 보일 수 있음
++    sigma_dist = (data**2) / (cfg.f_pixel * cfg.baseline) * cfg.subpixel
++    
++    # 2. 에지 노이즈 (Edge Scattering)
++    # 80x60 해상도에서는 픽셀 간격이 넓으므로 차분값이 크게 튈 수 있음
++    diff_x = torch.abs(data - torch.roll(data, shifts=1, dims=-1))
++    diff_y = torch.abs(data - torch.roll(data, shifts=1, dims=-2))
++    edge_map = torch.max(diff_x, diff_y)
++    
++    # 저해상도 특성을 고려한 에지 노이즈 합산
++    sigma_edge = edge_map * cfg.edge_std_scale
++    sigma_total = torch.sqrt(sigma_dist**2 + sigma_edge**2)
++    
++    # 가우시안 노이즈 추가
++    noise = torch.randn_like(data) * sigma_total
++    data_noisy = data + noise
++    
++    # 3. Holes (M_hole) - 데이터 결손 마스크
++    # 저해상도에서는 구멍 하나가 큰 지형지물을 가릴 수 있으므로 확률을 신중히 조절
++    hole_prob = cfg.hole_prob_base + \
++                (data > cfg.hole_prob_z_limit).float() * 0.05 + \
++                (edge_map > 1.0).float() * 0.1  # 에지 임계치를 1.0으로 상향
++    
++    m_hole = (torch.rand_like(data) > hole_prob).float()
++    
++    # 최종 결과 및 클리핑
++    output = m_hole * data_noisy
++    return torch.clamp(output, 0.0, 10.0)
++
++
+ ##
+ # Noise models as classes
+ ##
+@@ -190,3 +225,4 @@ class NoiseModelWithAdditiveBias(NoiseModel):
+             # now re-sample that expanded bias in-place
+             self.reset()
+         return super().__call__(data) + self._bias
++
+

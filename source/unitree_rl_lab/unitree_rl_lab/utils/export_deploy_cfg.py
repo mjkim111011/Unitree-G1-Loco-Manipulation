@@ -19,7 +19,7 @@ def format_value(x):
         return x
 
 
-def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
+def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir, policy_obs_groups: list[str] | None = None):
     asset: Articulation = env.scene["robot"]
     joint_sdk_names = env.cfg.scene.robot.joint_sdk_names
     joint_ids_map, _ = resolve_matching_names(asset.data.joint_names, joint_sdk_names, preserve_order=True)
@@ -41,11 +41,18 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
         cfg["commands"]["base_velocity"] = {}
         if hasattr(env.cfg.commands.base_velocity, "limit_ranges"):
             ranges = env.cfg.commands.base_velocity.limit_ranges.to_dict()
-        else:
+        elif hasattr(env.cfg.commands.base_velocity, "ranges"):
             ranges = env.cfg.commands.base_velocity.ranges.to_dict()
-        for item_name in ["lin_vel_x", "lin_vel_y", "ang_vel_z"]:
-            ranges[item_name] = list(ranges[item_name])
-        cfg["commands"]["base_velocity"]["ranges"] = ranges
+        else:
+            command_cfg = env.cfg.commands.base_velocity.to_dict()
+            command_cfg.pop("class_type", None)
+            command_cfg.pop("debug_vis", None)
+            cfg["commands"]["base_velocity"]["camera_navigation"] = command_cfg
+            ranges = None
+        if ranges is not None:
+            for item_name in ["lin_vel_x", "lin_vel_y", "ang_vel_z"]:
+                ranges[item_name] = list(ranges[item_name])
+            cfg["commands"]["base_velocity"]["ranges"] = ranges
 
     # --- actions ---
     action_names = env.action_manager.active_terms
@@ -80,31 +87,34 @@ def export_deploy_cfg(env: ManagerBasedRLEnv, log_dir):
             cfg["actions"][action_name]["joint_ids"] = action_term._joint_ids
 
     # --- observations ---
-    obs_names = env.observation_manager.active_terms["policy"]
-    obs_cfgs = env.observation_manager._group_obs_term_cfgs["policy"]
-    obs_terms = zip(obs_names, obs_cfgs)
+    if policy_obs_groups is None:
+        policy_obs_groups = ["policy"]
     cfg["observations"] = {}
-    for obs_name, obs_cfg in obs_terms:
-        obs_dims = tuple(obs_cfg.func(env, **obs_cfg.params).shape)
-        term_cfg = obs_cfg.copy()
-        if term_cfg.scale is not None:
-            scale = term_cfg.scale.detach().cpu().numpy().tolist()
-            if isinstance(scale, float):
-                term_cfg.scale = [scale for _ in range(obs_dims[1])]
+    cfg["policy_observation_groups"] = policy_obs_groups
+    for group_name in policy_obs_groups:
+        obs_names = env.observation_manager.active_terms[group_name]
+        obs_cfgs = env.observation_manager._group_obs_term_cfgs[group_name]
+        for obs_name, obs_cfg in zip(obs_names, obs_cfgs):
+            obs_dims = tuple(obs_cfg.func(env, **obs_cfg.params).shape)
+            term_cfg = obs_cfg.copy()
+            if term_cfg.scale is not None:
+                scale = term_cfg.scale.detach().cpu().numpy().tolist()
+                if isinstance(scale, float):
+                    term_cfg.scale = [scale for _ in range(obs_dims[1])]
+                else:
+                    term_cfg.scale = scale
             else:
-                term_cfg.scale = scale
-        else:
-            term_cfg.scale = [1.0 for _ in range(obs_dims[1])]
-        if term_cfg.clip is not None:
-            term_cfg.clip = list(term_cfg.clip)
-        if term_cfg.history_length == 0:
-            term_cfg.history_length = 1
+                term_cfg.scale = [1.0 for _ in range(obs_dims[1])]
+            if term_cfg.clip is not None:
+                term_cfg.clip = list(term_cfg.clip)
+            if term_cfg.history_length == 0:
+                term_cfg.history_length = 1
 
-        # clean cfg
-        term_cfg = term_cfg.to_dict()
-        for _ in ["func", "modifiers", "noise", "flatten_history_dim"]:
-            del term_cfg[_]
-        cfg["observations"][obs_name] = term_cfg
+            # clean cfg
+            term_cfg = term_cfg.to_dict()
+            for _ in ["func", "modifiers", "noise", "flatten_history_dim"]:
+                del term_cfg[_]
+            cfg["observations"][obs_name] = term_cfg
 
     # --- save config file ---
     filename = os.path.join(log_dir, "params", "deploy.yaml")

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "captured_on": "2026-10-05",
+  "platform": "Linux x86_64 Ubuntu 22.04.5 glibc 2.35",
+  "gpu_observed": "RTX 3090 Ti / driver 590.48.01",
+  "main": {
+    "python": "3.11.14",
+    "isaacsim": "5.1.0.0",
+    "torch": "2.7.0+cu128",
+    "isaaclab": {
+      "url": "https://github.com/isaac-sim/IsaacLab.git",
+      "commit": "73930be06597075d6e587af1f0a55e0439931f83",
+      "patch": "packaging/patches/isaaclab-current.patch"
+    }
+  },
+  "arena": {
+    "python": "3.12.12",
+    "isaacsim": "6.0.1.0",
+    "torch": "2.11.0+cu128",
+    "url": "https://github.com/isaac-sim/IsaacLab-Arena.git",
+    "commit": "c5826c87aa181442328c2c74c49f9e551b5c3d8c",
+    "isaaclab_submodule_commit": "af1bab4dc173ba69b08fab779c14ead61d13fd33",
+    "uv_version": "0.10.0",
+    "uv_lock_sha256": "64d912c667eb64776e3c543697cdbcdf16cc97bf7b117d8f2f052128771ac9bf",
+    "metadata_conflicts_expected": [
+      "openpi-client: numpy<2 vs numpy==2.3.1",
+      "isaaclab: coverage==7.6.1 vs coverage==7.4.4",
+      "isaacsim-kernel: websockets==12.0 vs websockets==16.1.1"
+    ],
+    "lockfile": "upstream uv.lock at the pinned commit"
+  },
+  "unitree_ros": {
+    "url": "https://github.com/unitreerobotics/unitree_ros.git",
+    "commit": "d96d8f63ae17a7108d4f7229c00ef875ba7129c9"
+  },
+  "compatibility_changes": {
+    "starlette": "0.45.3",
+    "wheel": "0.45.1",
+    "wrapt": "1.16.0"
+  },
+  "excluded_editables": [
+    "lab.cocelo",
+    "robot_lab"
+  ],
+  "excluded_unused_packages": ["swanlab (requires wrapt>=1.17; Isaac Sim 5.1 requires wrapt==1.16)"],
+  "notes": [
+    "Do not combine the main and Arena environments.",
+    "Isaac Lab distribution versions are not release tag versions.",
+    "No historical pip installation ordering can be proven from package metadata alone."
+  ]
+}

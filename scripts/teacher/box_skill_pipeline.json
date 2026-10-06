@@ -1,0 +1,359 @@
+{
+  "schema_version": "1.7.0",
+  "scene": {
+    "box_size_m": [0.2, 0.2, 0.2],
+    "box_mass_kg": 0.2,
+    "box_static_friction": 1.5,
+    "box_dynamic_friction": 1.2,
+    "table_surface_height_m": 0.74,
+    "box_yaw_rad": 0.0,
+    "random_box_x_range_m": [0.618, 0.622],
+    "random_box_y_range_m": [-0.002, 0.002],
+    "retarget_scheme": "mimic_translate_only",
+    "control_frequency_hz": 50.0
+  },
+  "velocity_command_contract": {
+    "approach": {
+      "student_observation": "camera_qr_box_pregrasp_velocity",
+      "teacher_high_level_action": "camera_qr_box_pregrasp_velocity"
+    },
+    "grasp_lift": {
+      "student_observation": [0.0, 0.0, 0.0],
+      "teacher_high_level_action": [0.0, 0.0, 0.0]
+    },
+    "carry": {
+      "student_observation": "camera_qr_bin_navigation_velocity",
+      "teacher_high_level_action": "camera_qr_bin_navigation_velocity"
+    },
+    "place": {
+      "student_observation": "camera_qr_bin_yaw_alignment_velocity",
+      "teacher_high_level_action": [0.0, 0.0, 0.0]
+    }
+  },
+  "teacher_dataset_gate": {
+    "minimum_accepted_demos": 500,
+    "maximum_accepted_demos": 1000,
+    "minimum_random_position_success_rate": 0.8,
+    "minimum_left_box_filtered_contacts": 1,
+    "minimum_right_box_filtered_contacts": 1,
+    "minimum_lift_m": 0.12,
+    "continuous_hold_seconds": 2.0,
+    "continuous_hold_steps": 100,
+    "bad_orientation_limit_rad": 0.8,
+    "manifest_must_be_complete": true,
+    "all_shards_strictly_audited": true,
+    "accepted_demo_snapshot_counts_must_match": true,
+    "production_manifest_enforcement_scope": [
+      "shard_directory",
+      "manifest_json"
+    ]
+  },
+  "student_observation": {
+    "schema": "unitree_box_qr_proprio_v1",
+    "dimension": 517,
+    "inputs": ["policy_history", "policy_current"],
+    "policy_history_frames": 5,
+    "policy_history_dimension": 460,
+    "policy_current_history_length": 0,
+    "policy_current_semantics": "live_current_frame",
+    "privileged_pose_inputs": []
+  },
+  "critic_observation": {
+    "critic_history_frames": 5,
+    "critic_current_history_length": 0,
+    "critic_current_semantics": "live_current_frame"
+  },
+  "action_contract": {
+    "supported_targets": {
+      "processed_43d_joint_target": 43,
+      "teacher_high_level_action": 23
+    },
+    "ordered_names_required_in_every_dataset": true,
+    "all_training_sources_must_match_exactly": true,
+    "checkpoint_fields": [
+      "action_key",
+      "ordered_action_names",
+      "action_contract_sha256"
+    ],
+    "hash_payload": "canonical_json(action_key,ordered_names)",
+    "runtime_order_check_before_action": true
+  },
+  "bc": {
+    "validation_order": ["grasp_lift", "approach", "carry", "place"],
+    "routing_order": ["approach", "grasp_lift", "carry", "place"],
+    "bc2_gate": {
+      "maximum_validation_normalized_mse": 0.25,
+      "minimum_physical_episodes": 20,
+      "minimum_bimanual_grasp_lift_success_rate": 0.8,
+      "maximum_bad_orientation_rate": 0.05,
+      "minimum_lift_m": 0.12,
+      "minimum_hold_seconds": 2.0,
+      "recompute_aggregates_from_episode_results": true,
+      "strict_episode_audit": [
+        "sequential_episode_id",
+        "positive_step_count",
+        "integer_continuous_hold_count",
+        "initial_box_xy_inside_evaluator_range",
+        "success_reason_and_hold_consistency",
+        "bad_orientation_reason_consistency"
+      ],
+      "bindings": [
+        "checkpoint_path",
+        "checkpoint_sha256",
+        "action_key",
+        "action_contract_sha256",
+        "rollout_metrics_path",
+        "rollout_metrics_sha256",
+        "snapshot_output_path",
+        "snapshot_output_sha256",
+        "evaluator_config_sha256"
+      ],
+      "runtime_reopens_and_rehashes_rollout_metrics": true,
+      "runtime_reopens_and_rehashes_snapshot_output": true
+    },
+    "carry_start_snapshot": {
+      "kind": "bilateral_hold",
+      "required_producer": "evaluate_bc2_rollout",
+      "required_gate_action_key": "processed_43d_joint_target",
+      "reject_production_shard_snapshots": true,
+      "metadata_must_match_gate": [
+        "checkpoint_sha256",
+        "action_key",
+        "action_contract_sha256",
+        "strict_hold_seconds",
+        "strict_lift_m",
+        "required_hold_steps"
+      ],
+      "input_path_and_sha256_must_equal_gate_snapshot_binding": true,
+      "each_snapshot_revalidated_at_gate_required_hold_steps": true,
+      "input_snapshot_sha256_recorded_in_carry_dataset": true
+    },
+    "place_start_snapshot": {
+      "kind": "carry_at_staging",
+      "required_producer": "collect_carry_place_teacher:carry",
+      "records_parent_snapshot_path": true,
+      "records_parent_snapshot_sha256": true
+    }
+  },
+  "physical_snapshot": {
+    "writer_schema_version": "2.0.0",
+    "readable_schema_versions": ["1.0.0", "2.0.0"],
+    "provenance": "physical_rollout_capture",
+    "restore_together": [
+      "robot_root_link_state",
+      "robot_43d_joint_position",
+      "robot_43d_joint_velocity",
+      "box_root_link_state",
+      "last_action",
+      "task_phase",
+      "policy_history_5_frames"
+    ],
+    "policy_history_dimension": 460,
+    "policy_history_restore": "exact_chronological_observation_manager_buffers",
+    "policy_history_post_restore_equality_check": true,
+    "minimum_stable_hold_steps": 100,
+    "post_restore_physics_recheck": true,
+    "single_environment_restore_only": true,
+    "box_only_teleport_allowed": false,
+    "carry_at_staging_requires_for_place": "unprocessed_wbc_raw_action",
+    "legacy_staging_without_wbc_baseline_fails_closed": true
+  },
+  "carry_teacher_controller": {
+    "pelvis_height_command_m": 0.75,
+    "default_horizon_seconds": 16.0,
+    "maximum_recorded_steps_at_50hz": 800,
+    "staging_gate_unchanged": {
+      "bin_qr_visible": true,
+      "standoff_distance_m": 0.30,
+      "distance_tolerance_m": 0.10,
+      "absolute_yaw_tolerance_rad": 0.15,
+      "requires_bilateral_strict_lift_hold": true
+    },
+    "unrecorded_zero_navigation_handoff_steps": 25,
+    "handoff_applies_to": ["carry", "place"],
+    "handoff_lower_body_waist_blend": "smoothstep_snapshot_last_action_to_arena_wbc",
+    "locked_arm_hand_target_count": 28,
+    "locked_joint_name_tokens": ["shoulder", "elbow", "wrist", "_hand_"],
+    "grasp_lock_reference": "phase_start_snapshot_last_action",
+    "lock_applied_during_handoff": true,
+    "lock_applied_during_recorded_carry": true,
+    "navigation_ramp_steps": 50,
+    "navigation_ramp_fraction": "min(1,(recorded_step+1)/50)",
+    "scaled_command_written_to": [
+      "student_observation.velocity_commands",
+      "teacher_high_level_action[16:19]"
+    ],
+    "processed_43d_target_contains_grasp_lock": true,
+    "high_level_replay_requires_postprocessor": true,
+    "high_level_postprocessor": "after_wbc_overwrite_28_raw_arm_hand_channels_from_episode_carry_grasp_lock_reference_raw_action",
+    "runtime_semantic_contract": {
+      "schema": "unitree_box_carry_runtime_contract_v1",
+      "sha256_bound": true,
+      "teacher_sources_must_match_exactly": true,
+      "checkpoint_fields": [
+        "carry_runtime_contract",
+        "carry_runtime_contract_sha256"
+      ],
+      "bound_fields": [
+        "navigation_ramp_steps",
+        "navigation_ramp_profile",
+        "grasp_lock_postprocessor_version",
+        "grasp_lock_reference",
+        "ordered_raw_joint_names",
+        "locked_raw_joint_indices",
+        "locked_raw_joint_names",
+        "locked_raw_joint_mask"
+      ],
+      "ramp_applies_to": [
+        "teacher_high_level_action",
+        "processed_43d_joint_target"
+      ],
+      "runtime_grasp_lock_applies_to": ["teacher_high_level_action"],
+      "processed_43d_grasp_lock_already_embedded": true
+    }
+  },
+  "place_teacher_controller": {
+    "pelvis_height_command_m": 0.75,
+    "trajectory": {
+      "raise_steps": 25,
+      "translate_steps": 100,
+      "lower_steps": 60,
+      "release_steps": 50,
+      "clearance_m": 0.08,
+      "release_height_m": 0.7,
+      "release_height_rationale": "clears the 0.54m Bin wall for the fixed 0.20m Box before bilateral release"
+    },
+    "unrecorded_zero_navigation_handoff_steps": 25,
+    "handoff_uses_carry_hold_teacher": true,
+    "lock_28_arm_hand_targets_during_handoff": true,
+    "recording_begins_only_after_handoff_gate": true,
+    "runtime_semantic_contract": {
+            "schema": "unitree_box_place_runtime_contract_v4",
+            "postprocessor_version": "place_decayed_loaded_arm_offset_and_finger_lock_until_release_v1",
+      "sha256_bound": true,
+      "teacher_sources_must_match_exactly": true,
+      "loaded_raw_reference": "carry_to_place_transition_last_applied_action_raw",
+      "active_pink_raw_baseline_reference": "same_active_controller_carry_to_place_unprocessed_pink_wbc_raw",
+      "source_snapshot_pink_baseline": "required_provenance_audit_only",
+      "source_snapshot_pink_baseline_used_in_delta": false,
+            "arm_offset_equation": "pink_proposed + decay(place_step) * (loaded_ref - active_pink_baseline)",
+            "arm_offset_decay_steps": 100,
+            "arm_offset_decay_profile": "smoothstep_one_to_zero_inclusive_v1",
+            "arm_offset_decay_step_origin": "first_recorded_place_step_is_zero",
+      "arm_delta_target_count": 14,
+      "arm_joint_name_tokens": ["shoulder", "elbow", "wrist"],
+      "locked_finger_target_count": 14,
+      "finger_joint_name_token": "_hand_",
+      "bilateral_release_predicate": "both_hand_states_lte_0.5",
+      "one_sided_release_keeps_both_locked": true,
+      "checkpoint_fields": [
+        "place_runtime_contract",
+        "place_runtime_contract_sha256"
+      ],
+      "runtime_decayed_arm_offset_and_finger_lock_applies_to": ["teacher_high_level_action"],
+      "processed_43d_decayed_arm_offset_and_finger_lock_already_embedded": true
+    }
+  },
+  "phase_teacher_publication": {
+    "applies_to": ["carry", "place"],
+    "collection_run_id": "new_uuid_per_invocation",
+    "dataset_metadata_contains_collection_run_id": true,
+    "carry_staging_metadata_contains_collection_run_id": true,
+    "metrics_sidecar": "same_stem.metrics.json",
+    "dataset_fields": [
+      "collection_run_id",
+      "phase",
+      "successes",
+      "dataset_published",
+      "published_output",
+      "dataset_sha256"
+    ],
+    "carry_staging_fields": [
+      "staging_snapshot_published",
+      "published_staging_snapshot_output",
+      "staging_snapshot_sha256"
+    ],
+    "failed_overwrite_marks_preexisting_files_stale": true,
+    "phase_bc_rejects_if": [
+      "sidecar_missing",
+      "collection_run_id_mismatch",
+      "teacher_phase_mismatch",
+      "dataset_published_not_true",
+      "published_output_path_mismatch",
+      "dataset_sha256_mismatch",
+      "successful_physical_rollout_count_not_positive"
+    ]
+  },
+  "fsm": {
+    "routing_order": ["approach", "grasp_lift", "carry", "place", "complete"],
+    "per_skill_action_representation": {
+      "approach": "teacher_high_level_action",
+      "grasp_lift": "processed_43d_joint_target",
+      "carry": "processed_43d_joint_target",
+      "place": "processed_43d_joint_target"
+    },
+    "mixed_action_representations_allowed": true,
+    "approach_to_grasp_handoff": "measured_bimanual_fingertip_cage_and_centered_wrists",
+    "camera_navigation_at_pregrasp_is_not_a_manipulation_handoff": true,
+    "approach_to_grasp_action_blend": {
+      "profile": "smoothstep_realized_raw_action_to_bc2",
+      "steps": 25
+    },
+    "maximum_phase_advances_per_step": 1,
+        "carry_drop_is_fatal": true,
+        "place_drop_is_fatal": true,
+        "place_drop_predicate": "box_reaches_ground_threshold_outside_bin",
+        "airborne_release_above_bin_is_not_drop": true,
+    "place_success": {
+      "box_inside_bin": true,
+      "both_hands_released": true,
+      "maximum_box_linear_speed_mps": 0.15,
+      "consecutive_settle_steps": 10
+    },
+    "metrics": [
+      "P(approach)",
+      "P(grasp|approach)",
+      "P(carry|grasp)",
+      "P(place|carry)",
+      "full_task_success"
+    ]
+  },
+  "dagger_correction_types": [
+    "one_hand_first",
+    "wrist_off_center",
+    "box_rotated_in_hand",
+    "lift_slip",
+    "qr_temporarily_missing"
+  ],
+  "dagger": {
+    "teacher_uses_privileged_current_state": true,
+    "teacher_label_uses_live_box_pose_and_orientation": true,
+    "student_uses_privileged_pose": false,
+    "qr_dropout_is_observation_only": true,
+    "visible_anchor_is_recovery_gate": false,
+    "visible_anchor_purpose": "retain teacher-labelled post-close states with intact QR perception",
+    "physical_pose_teleport_allowed": false,
+    "wrench_composer": {
+      "reset_at_episode_start": true,
+      "reset_before_each_step_pulse": true,
+      "reset_during_cleanup": true,
+      "force_torque_frame": "world",
+      "use_current_box_link_pose_after_reset": true
+    },
+    "physical_recovery_campaigns": {
+      "schedule": "seeded_cycle",
+      "one_hand_first": "short_lateral_box_force_before_close",
+      "wrist_off_center": "short_lateral_box_force_after_close",
+      "box_rotated_in_hand": "short_box_yaw_torque_after_bilateral_contact",
+      "lift_slip": "short_diagonal_down_box_force_after_initial_lift"
+    },
+    "require_all_correction_types": true,
+    "minimum_samples_per_correction_type": 10,
+    "maximum_samples_per_episode": 128,
+    "maximum_invisible_to_visible_ratio": 3.0,
+    "minimum_visible_fraction": 0.2,
+    "maximum_single_correction_fraction": 0.95,
+    "source_checkpoint_and_gate_sha256_bound": true,
+    "abort_atomic_publish_on_quota_failure": true
+  }
+}
