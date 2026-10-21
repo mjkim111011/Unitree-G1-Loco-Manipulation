@@ -48,6 +48,14 @@ parser.add_argument(
     default=750,
     help="Maximum recorded control frames (750 frames at 25 fps is 30 seconds)",
 )
+parser.add_argument(
+    "--wrist_orientation_source",
+    choices=("command", "observed"),
+    default="command",
+    help="Teacher approach wrist orientation source; must match the collected teacher corpus.",
+)
+parser.add_argument("--wrist_z_offset_m", type=float, default=0.0)
+parser.add_argument("--hold_lift_margin_m", type=float, default=0.05)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -150,7 +158,12 @@ def main() -> None:
     policy = load_bc_policy(args_cli.checkpoint, args_cli.device)
     if policy.skill_phase != SkillPhase.GRASP_LIFT:
         raise ValueError("checkpoint must be a grasp_lift BC-2 policy")
-    trajectory = ArenaLiftTrajectory(args_cli.arena_dataset)
+    trajectory = ArenaLiftTrajectory(
+        args_cli.arena_dataset,
+        hold_lift_margin_m=args_cli.hold_lift_margin_m,
+        wrist_z_offset_m=args_cli.wrist_z_offset_m,
+        wrist_orientation_source=args_cli.wrist_orientation_source,
+    )
     video_path = (
         None
         if args_cli.video_output is None
@@ -349,6 +362,9 @@ def main() -> None:
         "control_frequency_hz": 1.0 / env.step_dt,
         "rollout_mode": "teacher" if args_cli.teacher_only else "student_bc2",
         "video_output_prefix": None if video_path is None else str(video_path),
+        "teacher_wrist_orientation_source": args_cli.wrist_orientation_source,
+        "teacher_wrist_z_offset_m": args_cli.wrist_z_offset_m,
+        "teacher_hold_lift_margin_m": args_cli.hold_lift_margin_m,
     }
     evaluator_config_sha256 = hashlib.sha256(
         json.dumps(
