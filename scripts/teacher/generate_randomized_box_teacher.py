@@ -207,6 +207,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--teacher_hand_stiffness", type=float, default=4.0)
     parser.add_argument("--realized_hold_support_m", type=float, default=0.003)
     parser.add_argument(
+        "--wrist_orientation_source", choices=("command", "observed"), default="command"
+    )
+    parser.add_argument("--wrist_z_offset_m", type=float, default=0.0)
+    parser.add_argument("--hold_lift_margin_m", type=float, default=0.05)
+    parser.add_argument(
         "--freeze_realized_hold_wrists",
         action="store_true",
         help="Experimental hold controller; disabled for the validated default pipeline.",
@@ -370,6 +375,9 @@ def main() -> None:
                     "teacher_wrist_compression_m": args.wrist_compression_m,
                     "teacher_hand_stiffness": args.teacher_hand_stiffness,
                     "realized_hold_support_m": args.realized_hold_support_m,
+                    "teacher_wrist_orientation_source": args.wrist_orientation_source,
+                    "teacher_wrist_z_offset_m": args.wrist_z_offset_m,
+                    "teacher_hold_lift_margin_m": args.hold_lift_margin_m,
                     "freeze_realized_hold_wrists": bool(
                         args.freeze_realized_hold_wrists
                     ),
@@ -429,6 +437,12 @@ def main() -> None:
             str(args.teacher_hand_stiffness),
             "--realized_hold_support_m",
             str(args.realized_hold_support_m),
+            "--wrist_orientation_source",
+            args.wrist_orientation_source,
+            "--wrist_z_offset_m",
+            str(args.wrist_z_offset_m),
+            "--hold_lift_margin_m",
+            str(args.hold_lift_margin_m),
             "--device",
             args.device,
         ]
