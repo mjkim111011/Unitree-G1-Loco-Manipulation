@@ -96,6 +96,18 @@ parser.add_argument(
     help="Symmetric horizontal inward wrist ramp used to stabilize a physical bimanual hold.",
 )
 parser.add_argument(
+    "--wrist_z_offset_m",
+    type=float,
+    default=0.0,
+    help="Constant world-up offset on retargeted wrist targets (tabletop fingertip clearance).",
+)
+parser.add_argument(
+    "--wrist_orientation_source",
+    choices=("command", "observed"),
+    default="command",
+    help="Arena wrist orientation used for retargeting: recorded command or realized link pose.",
+)
+parser.add_argument(
     "--teacher_hand_stiffness",
     type=float,
     default=4.0,
@@ -128,6 +140,13 @@ parser.add_argument("--box_static_friction", type=float, default=1.5)
 parser.add_argument("--box_dynamic_friction", type=float, default=1.2)
 parser.add_argument("--box_restitution", type=float, default=0.0)
 parser.add_argument("--close_lead_steps", type=int, default=5)
+parser.add_argument(
+    "--video_output",
+    default=None,
+    help="Optional MP4 path for a headless recording of every control step; requires --enable_cameras",
+)
+parser.add_argument("--video_eye", type=float, nargs=3, default=(1.35, -0.45, 1.30))
+parser.add_argument("--video_lookat", type=float, nargs=3, default=(0.55, 0.0, 0.85))
 parser.add_argument("--overwrite", action="store_true")
 parser.add_argument(
     "--disable_fabric", action="store_true", help="Use USD I/O instead of Fabric."
@@ -151,6 +170,8 @@ if args_cli.hold_lift_margin_m < 0.0:
     parser.error("--hold_lift_margin_m must be non-negative")
 if not 0.0 <= args_cli.wrist_compression_m <= 0.03:
     parser.error("--wrist_compression_m must be in [0, 0.03]")
+if not 0.0 <= args_cli.wrist_z_offset_m <= 0.10:
+    parser.error("--wrist_z_offset_m must be in [0, 0.10]")
 if args_cli.teacher_hand_stiffness <= 0.0:
     parser.error("--teacher_hand_stiffness must be positive")
 if not 0.0 <= args_cli.realized_hold_support_m <= 0.02:
@@ -598,6 +619,12 @@ def _configure_nominal_environment():
     )
     cfg.scene.box.spawn.size = (size, size, size)
     cfg.scene.box.spawn.mass_props.mass = float(args_cli.box_mass)
+    if args_cli.video_output is not None:
+        cfg.viewer.eye = tuple(args_cli.video_eye)
+        cfg.viewer.lookat = tuple(args_cli.video_lookat)
+        cfg.viewer.origin_type = "env"
+        cfg.viewer.env_index = 0
+        cfg.viewer.resolution = (960, 540)
     cfg.scene.box.spawn.physics_material.static_friction = float(
         args_cli.box_static_friction
     )
@@ -832,10 +859,30 @@ def main() -> None:
         close_lead_steps=args_cli.close_lead_steps,
         hold_lift_margin_m=args_cli.hold_lift_margin_m,
         wrist_compression_m=args_cli.wrist_compression_m,
+        wrist_z_offset_m=args_cli.wrist_z_offset_m,
+        wrist_orientation_source=args_cli.wrist_orientation_source,
     )
     cfg = _configure_nominal_environment()
     print("[teacher] creating the current Box environment", flush=True)
-    env = gym.make(args_cli.task, cfg=cfg).unwrapped
+    env = gym.make(
+        args_cli.task,
+        cfg=cfg,
+        render_mode="rgb_array" if args_cli.video_output is not None else None,
+    ).unwrapped
+    video_writer = None
+    video_frame_count = 0
+    if args_cli.video_output is not None:
+        import imageio
+
+        video_path = Path(args_cli.video_output).expanduser().resolve()
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_writer = imageio.get_writer(
+            video_path,
+            fps=int(round(1.0 / env.step_dt)),
+            codec="libx264",
+            quality=7,
+            macro_block_size=8,
+        )
     print("[teacher] environment ready", flush=True)
     if not math.isclose(
         env.step_dt, 1.0 / CONTROL_FREQUENCY_HZ, rel_tol=0.0, abs_tol=1.0e-6
@@ -882,6 +929,8 @@ def main() -> None:
         "source_inferred_phase_boundaries": list(trajectory.phase_boundaries),
         "hold_lift_margin_m": trajectory.hold_lift_margin_m,
         "wrist_compression_m": trajectory.wrist_compression_m,
+        "wrist_z_offset_m": trajectory.wrist_z_offset_m,
+        "wrist_orientation_source": trajectory.wrist_orientation_source,
         "teacher_hand_stiffness": float(args_cli.teacher_hand_stiffness),
         "realized_hold_support_m": float(args_cli.realized_hold_support_m),
         "hold_stabilization": (
@@ -1103,6 +1152,11 @@ def main() -> None:
                     )
 
                     observation, _, _, _, _ = env.step(raw_action)
+                    if video_writer is not None:
+                        frame = env.render()
+                        if frame is not None:
+                            video_writer.append_data(np.asarray(frame, dtype=np.uint8))
+                            video_frame_count += 1
                     observation = _grasp_scope_observation(env)
                     if navigating:
                         navigation_steps += 1
@@ -1341,6 +1395,12 @@ def main() -> None:
             snapshot_store.abort()
         raise
     finally:
+        if video_writer is not None:
+            video_writer.close()
+            print(
+                f"[teacher] video written: {args_cli.video_output} ({video_frame_count} frames)",
+                flush=True,
+            )
         env.close()
 
     denominator = max(1, attempts)

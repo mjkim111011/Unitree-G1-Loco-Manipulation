@@ -70,12 +70,18 @@ class ArenaLiftTrajectory:
         close_lead_steps: int = 5,
         hold_lift_margin_m: float = 0.05,
         wrist_compression_m: float = DEFAULT_WRIST_COMPRESSION_M,
+        wrist_z_offset_m: float = 0.0,
+        wrist_orientation_source: str = "command",
         episode_name: str = "demo_0",
     ) -> None:
         if close_lead_steps < 0 or hold_lift_margin_m < 0.0:
             raise ValueError("close lead and hold lift margin must be non-negative")
         if not 0.0 <= wrist_compression_m <= 0.03:
             raise ValueError("wrist compression must be in [0, 0.03]")
+        if not 0.0 <= wrist_z_offset_m <= 0.10:
+            raise ValueError("wrist z offset must be in [0, 0.10]")
+        if wrist_orientation_source not in ("command", "observed"):
+            raise ValueError("wrist orientation source must be 'command' or 'observed'")
         self.path = Path(path).expanduser().resolve()
         source = load_episode_trajectory(self.path, episode_name)
         with h5py.File(self.path, "r") as dataset:
@@ -95,6 +101,22 @@ class ArenaLiftTrajectory:
         self.right_target_world = source.right_world_wrist_command.astype(
             np.float64, copy=True
         )
+        self.wrist_orientation_source = str(wrist_orientation_source)
+        if self.wrist_orientation_source == "observed":
+            # The bundled Arena sample's commanded wrist quaternions differ by
+            # roughly 180 deg about the wrist x-axis from the wrist_yaw_link
+            # frame of the pinned Arena robot model (its recorded joint angles
+            # reproduce the *observed* orientation exactly).  Feeding those
+            # commands to the current Pink model saturates wrist roll and
+            # twists the shoulders so the palms face away from the Box.  Keep
+            # the commanded positions (they encode the cage squeeze) but take
+            # orientation from the realized link pose.
+            self.left_target_world[:, :3, :3] = source.left_world_wrist_observed[
+                :, :3, :3
+            ]
+            self.right_target_world[:, :3, :3] = source.right_world_wrist_observed[
+                :, :3, :3
+            ]
         self.phase_boundaries = source.phase_boundaries
         if not math.isclose(
             source.control_frequency_hz, CONTROL_FREQUENCY_HZ, abs_tol=1.0e-9
@@ -128,6 +150,7 @@ class ArenaLiftTrajectory:
         self.close_index = max(0, self.pick_start - int(close_lead_steps))
         self.hold_lift_margin_m = float(hold_lift_margin_m)
         self.wrist_compression_m = float(wrist_compression_m)
+        self.wrist_z_offset_m = float(wrist_z_offset_m)
 
     def retarget(self, current_box_initial_pose_w: np.ndarray):
         return retarget_object_and_bimanual_wrists(
@@ -203,6 +226,12 @@ class ArenaLiftTrajectory:
             lift_compensation = self.hold_lift_margin_m * float(lift_fraction)
             left_world[2, 3] += lift_compensation
             right_world[2, 3] += lift_compensation
+            # The Arena source lifts its Box from a shelf, while this task
+            # uses a tabletop.  Translating wrists by the Box pose alone can
+            # bring the fingertips onto the table surface during approach;
+            # an optional constant world-up offset restores that clearance.
+            left_world[2, 3] += self.wrist_z_offset_m
+            right_world[2, 3] += self.wrist_z_offset_m
         pelvis_pose = np.asarray(current_pelvis_pose_w, dtype=np.float64)
         if pelvis_pose.shape == (7,):
             # Runtime callers naturally read ``xyz + wxyz`` from the
