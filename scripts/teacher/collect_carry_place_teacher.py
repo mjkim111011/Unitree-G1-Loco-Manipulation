@@ -185,6 +185,14 @@ parser.add_argument(
     help="Optional MP4 target prefix; requires --enable_cameras",
 )
 parser.add_argument("--video_length_steps", type=int, default=750)
+parser.add_argument(
+    "--video_follow_robot",
+    action="store_true",
+    help="Place the recording camera relative to the robot root so it follows Carry walking",
+)
+parser.add_argument("--video_eye", type=float, nargs=3, default=None)
+parser.add_argument("--video_lookat", type=float, nargs=3, default=None)
+parser.add_argument("--video_resolution", type=int, nargs=2, default=None)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -404,6 +412,17 @@ def _configure_environment():
         cfg.viewer.lookat = (0.70, -0.35, 0.75)
         cfg.viewer.origin_type = "env"
         cfg.viewer.env_index = 0
+        if args_cli.video_follow_robot:
+            cfg.viewer.origin_type = "asset_root"
+            cfg.viewer.asset_name = "robot"
+            cfg.viewer.eye = (1.0, -0.8, 0.5)
+            cfg.viewer.lookat = (0.3, 0.0, 0.05)
+        if args_cli.video_eye is not None:
+            cfg.viewer.eye = tuple(args_cli.video_eye)
+        if args_cli.video_lookat is not None:
+            cfg.viewer.lookat = tuple(args_cli.video_lookat)
+        if args_cli.video_resolution is not None:
+            cfg.viewer.resolution = tuple(args_cli.video_resolution)
     return cfg
 
 
