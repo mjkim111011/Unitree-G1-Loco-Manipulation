@@ -16,6 +16,8 @@ from unitree_rl_lab.runtime_paths import default_arena_root, default_arena_datas
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--phase", choices=("carry", "place"), required=True)
+parser.add_argument("--rule_based_place", action="store_true",
+                    help="Metrics-only align/open/withdraw diagnostic with live balance; no BC4 required")
 parser.add_argument("--snapshot_input", required=True)
 parser.add_argument(
     "--bc2_gate",
@@ -28,7 +30,7 @@ parser.add_argument(
     "--student_checkpoint",
     default=None,
     help=(
-        "Optional 23-D phase Student checkpoint. When supplied, run a metrics-only "
+        "Optional 23-D phase or 43-D Carry Student checkpoint. When supplied, run a metrics-only "
         "physical evaluation from the same provenance-checked snapshots instead of "
         "publishing Teacher demonstrations."
     ),
@@ -187,6 +189,8 @@ parser.add_argument(
 parser.add_argument("--video_length_steps", type=int, default=750)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.rule_based_place and (args_cli.phase != "place" or args_cli.student_checkpoint is not None):
+    parser.error("--rule_based_place requires --phase place without a Student checkpoint")
 
 if args_cli.student_teacher_relabel and args_cli.student_checkpoint is None:
     parser.error("--student_teacher_relabel requires --student_checkpoint")
@@ -821,6 +825,16 @@ def _run_trial(
     reference_raw_action = torch.as_tensor(
         snapshot.last_action, dtype=torch.float32, device=env.device
     ).unsqueeze(0)
+    if args_cli.rule_based_place:
+        from unitree_rl_lab.utils.teacher.rule_based_place import run_rule_based_place
+        return run_rule_based_place(
+            env, bridge,
+            bin_center=bin_pose[:3].detach().cpu().numpy(),
+            bin_half_extents=task_cfg.BIN_INNER_HALF_EXTENTS,
+            box_size=np.full(3, args_cli.box_size),
+            max_seconds=args_cli.max_phase_seconds,
+            source_episode=snapshot.source_episode,
+        )
     place_source_pink_baseline_raw_action = None
     place_active_pink_baseline_raw_action = None
     if args_cli.phase == "carry":
@@ -1248,7 +1262,9 @@ def _run_trial(
                 policy_observation = _place_student_observation(
                     student_policy, policy_observation, step
                 )
-            high_level = student_policy(policy_observation)[0]
+            student_prediction = student_policy(policy_observation)[0]
+            if student_policy.action_key == "teacher_high_level_action":
+                high_level = student_prediction
             if args_cli.phase == "place" and not place_finger_lock_active(
                 high_level[:2], place_runtime_contract
             ):
@@ -1259,6 +1275,15 @@ def _run_trial(
         names, values = bridge.step(bridge_request(env, high_level))
         raw_action, absolute_target = action_order_target(env, names, values)
         unprocessed_wbc_raw_action = raw_action.detach().clone()
+        if (
+            student_policy is not None
+            and student_policy.action_key == "processed_43d_joint_target"
+        ):
+            term = env.action_manager.get_term("JointPositionAction")
+            absolute_target = torch.as_tensor(
+                student_prediction, dtype=torch.float32, device=env.device
+            ).unsqueeze(0)
+            raw_action = (absolute_target - term._offset) / term._scale
         if args_cli.phase == "carry":
             raw_action, absolute_target = _preserve_realized_grasp_targets(
                 env, raw_action, reference_raw_action
@@ -1803,14 +1828,18 @@ def main() -> None:
                     f"Student checkpoint is {student_policy.skill_phase.name}, "
                     f"expected {expected_skill.name}"
                 )
-            if student_policy.action_key != "teacher_high_level_action":
-                raise ValueError(
-                    "snapshot phase evaluation requires a 23-D "
-                    "teacher_high_level_action Student checkpoint"
+            if student_policy.action_key == "processed_43d_joint_target" and args_cli.phase == "carry":
+                if args_cli.student_teacher_relabel:
+                    raise ValueError("43-D Carry evaluation does not support Teacher relabeling")
+                validate_runtime_action_contract(student_policy, joint_names)
+            elif student_policy.action_key == "teacher_high_level_action":
+                validate_runtime_action_contract(
+                    student_policy, DEFAULT_HIGH_LEVEL_ACTION_NAMES
                 )
-            validate_runtime_action_contract(
-                student_policy, DEFAULT_HIGH_LEVEL_ACTION_NAMES
-            )
+            else:
+                raise ValueError(
+                    "snapshot phase evaluation requires a 23-D phase or 43-D Carry checkpoint"
+                )
             if args_cli.phase == "carry":
                 checkpoint_contract = student_policy.carry_runtime_contract
                 runtime_contract = carry_runtime_contract
@@ -2004,7 +2033,8 @@ def main() -> None:
                     trial_index=index,
                 )
                 results.append(result)
-                print(f"[{index + 1}/{len(snapshots)}] {result}", flush=True)
+                displayed_result = {key: value for key, value in result.items() if key != "trace"}
+                print(f"[{index + 1}/{len(snapshots)}] {displayed_result}", flush=True)
                 if (index + 1) % 5 == 0:
                     progress_successes = sum(int(item["success"]) for item in results)
                     metrics_output.write_text(
@@ -2037,7 +2067,7 @@ def main() -> None:
             if args_cli.student_teacher_relabel
             else (
                 0
-                if student_policy is not None
+                if student_policy is not None or args_cli.rule_based_place
                 else sum(
                     int(result["success"])
                     + int(
@@ -2093,7 +2123,7 @@ def main() -> None:
     metrics = {
         "status": "completed",
         "evaluation_mode": (
-            "student_teacher_relabel"
+            "rule_based_place" if args_cli.rule_based_place else "student_teacher_relabel"
             if args_cli.student_teacher_relabel
             else (
                 "student_checkpoint"
@@ -2179,7 +2209,13 @@ def main() -> None:
     metrics_output.write_text(
         json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    print(json.dumps(metrics, indent=2, sort_keys=True))
+    displayed_metrics = dict(metrics)
+    if args_cli.rule_based_place:
+        displayed_metrics["results"] = [
+            {key: value for key, value in result.items() if key != "trace"}
+            for result in results
+        ]
+    print(json.dumps(displayed_metrics, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
