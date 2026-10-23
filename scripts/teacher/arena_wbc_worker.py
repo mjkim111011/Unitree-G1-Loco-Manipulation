@@ -184,6 +184,15 @@ class ArenaG1Controller:
                 body_targets, float(high_level_action[0]), float(high_level_action[1])
             )
 
+        if request.get("ik_only"):
+            # Upper-body IK only (no locomotion policy step): used to derive a
+            # joint-space delta for a small wrist adjustment.
+            return {
+                "ok": True,
+                "joint_names": self.joint_names,
+                "joint_target": np.asarray(ik_target, dtype=np.float32).tolist(),
+            }
+
         upper_indices = self.robot_model.get_joint_group_indices("upper_body")
         upper_target = np.asarray(ik_target, dtype=np.float64)[upper_indices][None, :]
 

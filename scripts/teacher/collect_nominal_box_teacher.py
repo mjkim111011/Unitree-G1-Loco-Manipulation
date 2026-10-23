@@ -141,6 +141,168 @@ parser.add_argument("--box_dynamic_friction", type=float, default=1.2)
 parser.add_argument("--box_restitution", type=float, default=0.0)
 parser.add_argument("--close_lead_steps", type=int, default=5)
 parser.add_argument(
+    "--support_regrasp",
+    action="store_true",
+    help=(
+        "After the lift, curl both middle fingers, briefly relax the side squeeze so the Box "
+        "settles onto them, then re-squeeze; the strict hold is counted only afterwards"
+    ),
+)
+parser.add_argument(
+    "--support_middle_curl",
+    type=float,
+    nargs=2,
+    default=(1.30, 1.70),
+    help="Left-hand middle_0/middle_1 flexion magnitudes (rad); the right hand is mirrored",
+)
+parser.add_argument("--support_release_m", type=float, default=0.006)
+parser.add_argument("--support_drop_m", type=float, default=0.0)
+parser.add_argument("--support_phase_steps", type=int, default=50)
+parser.add_argument(
+    "--support_wrist_pitch_rad",
+    type=float,
+    default=0.0,
+    help=(
+        "Rotate both wrist targets about the pelvis y-axis (palm normal) before curling, so the "
+        "middle fingers point down along the side faces and curl under the Box"
+    ),
+)
+parser.add_argument(
+    "--hook_grasp",
+    action="store_true",
+    help=(
+        "Prototype far-edge hook grasp: from the pre-close pose, slide open hands forward along the "
+        "side faces, squeeze, tilt the Box about its robot-side bottom edge, then curl index/middle "
+        "around the far face and swing both thumbs under the far bottom edge"
+    ),
+)
+parser.add_argument(
+    "--hug_after_hold",
+    action="store_true",
+    help=(
+        "After the strict side-squeeze hold succeeds, pull the lifted Box toward the body at waist "
+        "height (keeping the realized hand-Box pose), tilt it toward the torso and hold again"
+    ),
+)
+parser.add_argument("--hug_pos", type=float, nargs=2, default=(0.26, 0.10), help="Box centre x,z in pelvis frame")
+parser.add_argument("--hug_tilt_deg", type=float, default=15.0)
+parser.add_argument("--hug_move_steps", type=int, default=150)
+parser.add_argument("--hug_hold_steps", type=int, default=150)
+parser.add_argument(
+    "--regrasp_hug",
+    action="store_true",
+    help=(
+        "After the strict hold: set the Box down at the robot-side table edge, release, step in, "
+        "re-grasp the far half of the side faces with bent elbows, then lift and lean it on the torso"
+    ),
+)
+parser.add_argument("--regrasp_place_margin_m", type=float, default=0.015)
+parser.add_argument("--regrasp_place_dz_m", type=float, default=-0.015, help="Placement target z offset from resting height (compensates the hold lift margin)")
+parser.add_argument("--regrasp_target_dist_m", type=float, default=0.27)
+parser.add_argument("--regrasp_slide_m", type=float, default=0.18)
+parser.add_argument("--regrasp_reach_dz_m", type=float, default=0.0, help="Vertical offset of the re-grasp wrist targets (compensates the hold lift margin)")
+parser.add_argument("--regrasp_open_m", type=float, default=0.04)
+parser.add_argument("--regrasp_squeeze_m", type=float, default=0.005)
+parser.add_argument("--regrasp_hug_pose", type=float, nargs=3, default=(0.22, 0.15, 12.0), help="Box centre x,z [m] in pelvis frame and tilt toward torso [deg]")
+parser.add_argument(
+    "--flat_palm_grip",
+    action="store_true",
+    help="L-shaped grip: palm and straight index/middle flat on the side faces, thumb tip on the near face (FLAT_PALM_* constants)",
+)
+parser.add_argument("--flat_palm_blend_steps", type=int, default=60, help="Steps before close to move from the demo wrists to the outside of the grip")
+parser.add_argument("--flat_palm_out_m", type=float, default=0.04, help="Outward clearance of the palms before closing")
+parser.add_argument("--flat_palm_squeeze_m", type=float, default=0.015, help="Inward wrist push after contact (normal force with straight fingers)")
+parser.add_argument(
+    "--flat_palm_stand_dist",
+    type=float,
+    default=0.0,
+    help="If >0, step in to this Box-centre distance before closing and hold it until lift (the demo stance leaves the palms out of reach)",
+)
+parser.add_argument("--flat_palm_feedback", type=float, default=0.0, help="Integral gain correcting wrist sag before the palms touch")
+parser.add_argument(
+    "--flat_palm_press_curl",
+    type=float,
+    nargs=2,
+    default=None,
+    help="After the palms reach the faces, curl index/middle (proximal, distal rad) so the fingertips press the side faces",
+)
+parser.add_argument("--flat_palm_dx", type=float, default=0.0, help="Shift the grip along the Box x axis (negative = toward the robot, eases the thumb push)")
+parser.add_argument("--flat_palm_close_steps", type=int, default=40, help="Steps after close to move in and shape the hand")
+parser.add_argument("--proto_self_collision", action="store_true", help="Enable robot self-collisions (arms vs torso) for prototypes")
+parser.add_argument("--pull_test", action="store_true", help="Prototype: step in, hook the far face with both hands (palms on the sides), drag the Box toward the robot while stepping back")
+parser.add_argument("--pull_box_dist", type=float, default=0.33, help="Box centre distance ahead of the pelvis to keep")
+parser.add_argument("--pull_slide_m", type=float, default=0.18)
+parser.add_argument("--pull_distance_m", type=float, default=0.20)
+parser.add_argument("--pull_base_gain", type=float, default=2.0)
+parser.add_argument("--pull_open_lateral", type=float, default=0.045, help="Outward clearance of the open hook hands while walking in (pull_by_walking)")
+parser.add_argument("--pull_closed_lateral", type=float, default=-0.005, help="Outward offset of the hook hands after the inward sweep (pull_by_walking)")
+parser.add_argument("--pull_walkin_min_speed", type=float, default=0.06, help="Minimum walking speed command while walking in (pull_by_walking)")
+parser.add_argument(
+    "--pull_finger_curl",
+    type=float,
+    nargs=2,
+    default=None,
+    help="Index/middle (proximal, distal) curl in rad while hooking, instead of the teacher closed hand (pull_by_walking)",
+)
+parser.add_argument(
+    "--pull_regrasp_three_face",
+    action="store_true",
+    help="After the pull, regrasp with thumb on the near face, index on the side, middle under the overhanging bottom, then keep pulling",
+)
+parser.add_argument("--pull2_distance_m", type=float, default=0.25, help="Walk-back distance after the three-face regrasp")
+parser.add_argument("--pull2_squeeze_m", type=float, default=0.005, help="Inward wrist squeeze after the three-face regrasp")
+parser.add_argument("--pull2_stand_dist", type=float, default=0.42, help="Box-center distance held while regrasping")
+parser.add_argument("--pull2_dz", type=float, default=0.03, help="Raise the three-face wrist targets (sag compensation)")
+parser.add_argument("--pull2_wrist_feedback", type=float, default=0.0, help="Integral gain correcting wrist sag from the measured wrist position (free-space stages only)")
+parser.add_argument("--pull2_insert_dx", type=float, default=0.0, help="Stop the insertion this far (box x) from the planned pose")
+parser.add_argument("--pull2_insert_steps", type=int, default=100)
+parser.add_argument("--pull2_lift_m", type=float, default=0.03, help="Wrist lift at the end of the three-face pull")
+parser.add_argument("--pull_hand_dz", type=float, default=0.0, help="Raise the hook hand targets above the Box center (pull_by_walking)")
+parser.add_argument(
+    "--pull_by_walking",
+    action="store_true",
+    help="Extend the arms to the final pelvis-frame hook pose far from the Box, then walk in, close and walk back (arms fixed)",
+)
+parser.add_argument("--push_test", action="store_true", help="Prototype: walk to the table front, push the Box sideways (robot's right) with the left palm")
+parser.add_argument("--push_distance_m", type=float, default=0.20)
+parser.add_argument(
+    "--hold_base_walk",
+    action="store_true",
+    help="During manipulation keep |velocity command| >= 0.06 m/s (walk policy) with P-control on the table-relative stance and heading",
+)
+parser.add_argument("--push_stance", type=float, nargs=2, default=(0.40, 0.0), help="Table centre x,y in the pelvis frame before pushing")
+parser.add_argument("--push_hand_x", type=float, default=-0.15, help="Left wrist x offset in the Box frame while pushing")
+parser.add_argument("--squat_test", action="store_true", help="Prototype: retract arms, walk to a table-relative stance, squat and lean, then hold")
+parser.add_argument("--squat_height", type=float, default=0.60)
+parser.add_argument("--squat_pitch", type=float, default=0.35)
+parser.add_argument("--squat_stance", type=float, nargs=2, default=(0.34, 0.15), help="Table centre x,y in the pelvis frame at the stance")
+parser.add_argument("--hook_slide_m", type=float, default=0.18)
+parser.add_argument("--hook_target_dist_m", type=float, default=0.36)
+parser.add_argument("--hook_torso_pitch_rad", type=float, default=0.0)
+parser.add_argument(
+    "--hook_hug",
+    action="store_true",
+    help="After the tilt, lift slightly, pull the Box toward the robot and hold it against the body (no finger curl)",
+)
+parser.add_argument("--hook_pull_m", type=float, default=0.12)
+parser.add_argument("--hook_lift_m", type=float, default=0.03)
+parser.add_argument("--hook_hug_pos", type=float, nargs=2, default=(0.24, 0.10), help="Box centre x,z in the pelvis frame")
+parser.add_argument("--hook_hug_tilt_deg", type=float, default=20.0)
+parser.add_argument("--hook_camera_dir", default=None, help="Save D435 RGB frames at hook milestones (needs --enable_cameras)")
+parser.add_argument(
+    "--hook_hold_base",
+    action="store_true",
+    help="Keep a proportional base-distance command after step-in instead of a zero (stand) command",
+)
+parser.add_argument("--hook_stepin_steps", type=int, default=150)
+parser.add_argument("--hook_lower_m", type=float, default=0.02)
+parser.add_argument("--hook_open_m", type=float, default=0.03)
+parser.add_argument("--hook_squeeze_m", type=float, default=0.005)
+parser.add_argument("--hook_tilt_deg", type=float, default=25.0)
+parser.add_argument("--hook_phase_steps", type=int, default=50)
+parser.add_argument("--hook_hold_steps", type=int, default=150)
+parser.add_argument("--hook_finger_curl", type=float, nargs=2, default=(0.9, 1.3))
+parser.add_argument(
     "--video_output",
     default=None,
     help="Optional MP4 path for a headless recording of every control step; requires --enable_cameras",
@@ -172,6 +334,14 @@ if not 0.0 <= args_cli.wrist_compression_m <= 0.03:
     parser.error("--wrist_compression_m must be in [0, 0.03]")
 if not 0.0 <= args_cli.wrist_z_offset_m <= 0.10:
     parser.error("--wrist_z_offset_m must be in [0, 0.10]")
+if args_cli.support_regrasp and (
+    args_cli.support_phase_steps <= 0
+    or not 0.0 <= args_cli.support_release_m <= 0.03
+    or not 0.0 <= args_cli.support_drop_m <= 0.06
+    or not 0.0 <= args_cli.support_middle_curl[0] <= 1.571
+    or not 0.0 <= args_cli.support_middle_curl[1] <= 1.745
+):
+    parser.error("invalid --support_* parameters")
 if args_cli.teacher_hand_stiffness <= 0.0:
     parser.error("--teacher_hand_stiffness must be positive")
 if not 0.0 <= args_cli.realized_hold_support_m <= 0.02:
@@ -617,6 +787,8 @@ def _configure_nominal_environment():
         hand_stiffness=float(args_cli.teacher_hand_stiffness),
         hand_damping=0.5,
     )
+    if args_cli.proto_self_collision:
+        cfg.scene.robot.spawn.articulation_props.enabled_self_collisions = True
     cfg.scene.box.spawn.size = (size, size, size)
     cfg.scene.box.spawn.mass_props.mass = float(args_cli.box_mass)
     if args_cli.video_output is not None:
@@ -688,7 +860,11 @@ def _configure_nominal_environment():
     cfg.observations.policy_current.enable_corruption = False
     # QR-derived compact observations are geometric; an RGB render is not
     # required for teacher collection and would only reduce control rate.
-    cfg.scene.front_camera = None
+    if args_cli.hook_camera_dir is not None:
+        cfg.scene.front_camera.width = 320
+        cfg.scene.front_camera.height = 240
+    else:
+        cfg.scene.front_camera = None
     # Avoid auto-reset before post-step state is recorded.  The driver computes
     # the same 0.8-rad bad-orientation condition and ends the trial itself.
     cfg.terminations.bad_orientation = None
@@ -820,6 +996,212 @@ def _bridge_request(env, high_level_action: np.ndarray) -> dict:
     }
 
 
+# Wrist poses in the Box frame measured from a successful strict side-squeeze hold
+# (BC-2 rollout snapshot); the hook prototype slides these along the side faces.
+HOOK_BOX_WRIST = {
+    "left": np.array(
+        [[0.9283, -0.1272, 0.3494, -0.2002],
+         [0.1604, 0.9847, -0.0675, 0.1218],
+         [-0.3355, 0.1187, 0.9345, 0.0043],
+         [0.0, 0.0, 0.0, 1.0]]
+    ),
+    "right": np.array(
+        [[0.9489, 0.1096, 0.2959, -0.2076],
+         [-0.1421, 0.9857, 0.0906, -0.1303],
+         [-0.2817, -0.128, 0.9509, 0.0024],
+         [0.0, 0.0, 0.0, 1.0]]
+    ),
+}
+# Offline FK (pinocchio, URDF limits): thumbs reach under the far bottom edge.
+HOOK_THUMB_TARGETS = {
+    "left_hand_thumb_0_joint": 1.05,
+    "left_hand_thumb_1_joint": 1.05,
+    "left_hand_thumb_2_joint": 0.0,
+    "right_hand_thumb_0_joint": 1.05,
+    "right_hand_thumb_1_joint": -0.84,
+    "right_hand_thumb_2_joint": -0.22,
+}
+
+
+# Offline optimisation (URDF collision meshes, tmp flat_palm.py): palm and straight index/middle
+# flat on the side face (palm centre 3 cm below the Box centre, near half), thumb tip on the near face.
+# Wrist poses in the Box frame; the left grip mirrors the right one.
+FLAT_PALM_BOX_WRIST = {
+    "left": np.array(
+        [[0.999, 0.0319, -0.0322, -0.1803],
+         [-0.0296, 0.9972, 0.0691, 0.119],
+         [0.0343, -0.0681, 0.9971, -0.0363],
+         [0.0, 0.0, 0.0, 1.0]]
+    ),
+    "right": np.array(
+        [[0.9991, -0.0287, -0.0325, -0.1805],
+         [0.0263, 0.997, -0.0722, -0.1184],
+         [0.0344, 0.0712, 0.9969, -0.0366],
+         [0.0, 0.0, 0.0, 1.0]]
+    ),
+}
+FLAT_PALM_HAND = {
+    "left_hand_thumb_0_joint": -0.237,
+    "left_hand_thumb_1_joint": 0.075,
+    "left_hand_thumb_2_joint": 0.133,
+    "left_hand_index_0_joint": -0.118,
+    "left_hand_index_1_joint": -0.067,
+    "left_hand_middle_0_joint": -0.045,
+    "left_hand_middle_1_joint": -0.12,
+    "right_hand_thumb_0_joint": 0.237,
+    "right_hand_thumb_1_joint": -0.075,
+    "right_hand_thumb_2_joint": -0.133,
+    "right_hand_index_0_joint": 0.118,
+    "right_hand_index_1_joint": 0.069,
+    "right_hand_middle_0_joint": 0.039,
+    "right_hand_middle_1_joint": 0.134,
+}
+# Offline optimisation (pinocchio, URDF limits, tmp three_face.py): thumb on the near face,
+# index straight along the side face, middle under the bottom 3-4 cm from the near edge.
+THREE_FACE_BOX_WRIST = {
+    "left": np.array(
+        [[0.8916, -0.2382, 0.3852, -0.2253],
+         [0.0, 0.8505, 0.5259, 0.0891],
+         [-0.4529, -0.4689, 0.7583, -0.0185],
+         [0.0, 0.0, 0.0, 1.0]]
+    ),
+    "right": np.array(
+        [[0.881, 0.2745, 0.3853, -0.2258],
+         [0.0, 0.8144, -0.5803, -0.0877],
+         [-0.4731, 0.5112, 0.7175, -0.0086],
+         [0.0, 0.0, 0.0, 1.0]]
+    ),
+}
+THREE_FACE_HAND = {
+    "left_hand_thumb_0_joint": 0.18,
+    "left_hand_thumb_1_joint": 0.606,
+    "left_hand_thumb_2_joint": 1.73,
+    "left_hand_index_0_joint": 0.0,
+    "left_hand_index_1_joint": 0.0,
+    "left_hand_middle_0_joint": -0.469,
+    "left_hand_middle_1_joint": -1.74,
+    "right_hand_thumb_0_joint": 0.26,
+    "right_hand_thumb_1_joint": -0.818,
+    "right_hand_thumb_2_joint": -1.333,
+    "right_hand_index_0_joint": 0.0,
+    "right_hand_index_1_joint": 0.0,
+    "right_hand_middle_0_joint": 0.175,
+    "right_hand_middle_1_joint": 0.448,
+}
+
+
+def _smooth(fraction: float) -> float:
+    fraction = min(1.0, max(0.0, fraction))
+    return fraction * fraction * (3.0 - 2.0 * fraction)
+
+
+def _hook_box_pose(box_initial_pose: np.ndarray, tilt_rad: float) -> np.ndarray:
+    """Box pose tilted about its robot-side bottom edge (far edge rising)."""
+
+    half = 0.5 * float(args_cli.box_size)
+    pivot = np.eye(4)
+    pivot[:3, 3] = (-half, 0.0, -half)
+    tilt = np.eye(4)
+    tilt[:3, :3] = Rotation.from_euler("y", -tilt_rad).as_matrix()
+    return box_initial_pose @ pivot @ tilt @ np.linalg.inv(pivot)
+
+
+def _hook_wrist_world(
+    box_initial_pose: np.ndarray, side: str, tilt_rad: float, lateral_open_m: float
+) -> np.ndarray:
+    offset = np.eye(4)
+    outward = 1.0 if side == "left" else -1.0
+    offset[:3, 3] = (
+        float(args_cli.hook_slide_m),
+        outward * lateral_open_m,
+        -float(args_cli.hook_lower_m),
+    )
+    return _hook_box_pose(box_initial_pose, tilt_rad) @ offset @ HOOK_BOX_WRIST[side]
+
+
+def _interp_pose(a: np.ndarray, b: np.ndarray, fraction: float) -> np.ndarray:
+    from scipy.spatial.transform import Slerp
+
+    out = np.eye(4)
+    out[:3, 3] = (1.0 - fraction) * a[:3, 3] + fraction * b[:3, 3]
+    rotations = Rotation.from_matrix(np.stack([a[:3, :3], b[:3, :3]]))
+    out[:3, :3] = Slerp([0.0, 1.0], rotations)(fraction).as_matrix()
+    return out
+
+
+def _hook_finger_targets(
+    env, absolute_target: torch.Tensor, curl_fraction: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    action_term = env.action_manager.get_term("JointPositionAction")
+    action_names = list(action_term._joint_names)
+    target = absolute_target.clone()
+    proximal, distal = (float(v) for v in args_cli.hook_finger_curl)
+    goals = dict(HOOK_THUMB_TARGETS)
+    for side, sign in (("left", -1.0), ("right", 1.0)):
+        for finger in ("index", "middle"):
+            goals[f"{side}_hand_{finger}_0_joint"] = sign * proximal
+            goals[f"{side}_hand_{finger}_1_joint"] = sign * distal
+    for name, goal in goals.items():
+        index = action_names.index(name)
+        target[0, index] = (1.0 - curl_fraction) * target[0, index] + curl_fraction * goal
+    raw_action = (target - action_term._offset) / action_term._scale
+    return raw_action, target
+
+
+REGRASP_PHASES = (
+    ("place", 150),
+    ("settle", 75),
+    ("open", 50),
+    ("retract", 50),
+    ("stepin", 200),
+    ("reach", 100),
+    ("squeeze", 50),
+    ("hug", 150),
+    ("hold", 200),
+)
+
+
+def _regrasp_phase(elapsed: int) -> tuple[str, int, int]:
+    start = 0
+    for name, length in REGRASP_PHASES:
+        if elapsed < start + length:
+            return name, elapsed - start, length
+        start += length
+    return "done", elapsed - start, 1
+
+
+def _flat_box_pose(box_pose: np.ndarray, position: tuple[float, float, float]) -> np.ndarray:
+    yaw = Rotation.from_matrix(box_pose[:3, :3]).as_euler("zyx")[0]
+    out = np.eye(4)
+    out[:3, :3] = Rotation.from_euler("z", yaw).as_matrix()
+    out[:3, 3] = position
+    return out
+
+
+SUPPORT_MIDDLE_JOINT_SIGNS = {
+    "left_hand_middle_0_joint": (-1.0, 0),
+    "left_hand_middle_1_joint": (-1.0, 1),
+    "right_hand_middle_0_joint": (1.0, 0),
+    "right_hand_middle_1_joint": (1.0, 1),
+}
+
+
+def _support_regrasp_targets(
+    env, absolute_target: torch.Tensor, curl_fraction: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Blend both middle fingers toward the bottom-support flexion."""
+
+    action_term = env.action_manager.get_term("JointPositionAction")
+    action_names = list(action_term._joint_names)
+    target = absolute_target.clone()
+    for name, (sign, curl_index) in SUPPORT_MIDDLE_JOINT_SIGNS.items():
+        index = action_names.index(name)
+        support = sign * float(args_cli.support_middle_curl[curl_index])
+        target[0, index] = (1.0 - curl_fraction) * target[0, index] + curl_fraction * support
+    raw_action = (target - action_term._offset) / action_term._scale
+    return raw_action, target
+
+
 def _action_order_target(
     env, target_names: list[str], target_values: list[float]
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -931,6 +1313,12 @@ def main() -> None:
         "wrist_compression_m": trajectory.wrist_compression_m,
         "wrist_z_offset_m": trajectory.wrist_z_offset_m,
         "wrist_orientation_source": trajectory.wrist_orientation_source,
+        "support_regrasp": bool(args_cli.support_regrasp),
+        "support_middle_curl": list(args_cli.support_middle_curl),
+        "support_release_m": float(args_cli.support_release_m),
+        "support_drop_m": float(args_cli.support_drop_m),
+        "support_phase_steps": int(args_cli.support_phase_steps),
+        "support_wrist_pitch_rad": float(args_cli.support_wrist_pitch_rad),
         "teacher_hand_stiffness": float(args_cli.teacher_hand_stiffness),
         "realized_hold_support_m": float(args_cli.realized_hold_support_m),
         "hold_stabilization": (
@@ -1080,7 +1468,24 @@ def main() -> None:
                 bad_orientation = False
                 termination_reason = "teacher_horizon"
                 grace_steps = int(math.ceil(args_cli.hold_grace_seconds / env.step_dt))
-                max_steps = trajectory.freeze_index + required_hold_steps + grace_steps + navigation_budget
+                support_extra_steps = 3 * int(args_cli.support_phase_steps) if args_cli.support_regrasp else 0
+                if args_cli.regrasp_hug:
+                    support_extra_steps += sum(length for _, length in REGRASP_PHASES)
+                if args_cli.squat_test:
+                    support_extra_steps += 50 + 300 + 100 + 200
+                if args_cli.pull_test:
+                    support_extra_steps += 50 + 300 + 100 + 50 + 250 + 100
+                    if args_cli.pull_regrasp_three_face:
+                        support_extra_steps += 1300
+                if args_cli.push_test:
+                    support_extra_steps += 50 + 300 + 100 + 50 + 200 + 50 + 100
+                if args_cli.hug_after_hold:
+                    support_extra_steps += int(args_cli.hug_move_steps) + int(args_cli.hug_hold_steps)
+                if args_cli.hook_grasp:
+                    support_extra_steps += 7 * int(args_cli.hook_phase_steps) + int(args_cli.hook_hold_steps) + int(args_cli.hook_stepin_steps)
+                    if args_cli.hook_hug:
+                        support_extra_steps += 5 * int(args_cli.hook_phase_steps)
+                max_steps = trajectory.freeze_index + required_hold_steps + grace_steps + navigation_budget + support_extra_steps
                 max_lift_m = 0.0
                 max_tilt_rad = 0.0
                 max_left_contacts = 0
@@ -1094,10 +1499,32 @@ def main() -> None:
                 accepted_snapshot = None
                 realized_hold_wrist_world = None
                 realized_hold_lock_step: int | None = None
+                support_start_step: int | None = None
+                hook_start_step: int | None = None
+                hook_start_wrist_world: dict[str, np.ndarray] = {}
+                hook_start_wrist_pelvis: dict[str, np.ndarray] = {}
+                hook_hug_anchor: np.ndarray | None = None
+                hug_start_step: int | None = None
+                rg_start: int | None = None
+                sq_start: int | None = None
+                pl_start: int | None = None
+                pl: dict = {}
+                flat_palm_corr = {"left": np.zeros(3), "right": np.zeros(3)}
+                flat_palm_corr_rot = {"left": np.zeros(3), "right": np.zeros(3)}
+                pu_start: int | None = None
+                pu: dict = {}
+                sq: dict = {}
+                rg: dict = {}
+                hug_anchor_box: np.ndarray | None = None
+                hug_wrist_in_box: dict[str, np.ndarray] = {}
+                hook_log_every = 25
+                support_total_steps = 3 * int(args_cli.support_phase_steps)
 
                 for step in range(max_steps):
                     navigating = not navigation_complete
                     source_index = 0 if navigating else min(step - navigation_steps, trajectory.freeze_index)
+                    if (args_cli.hook_grasp or args_cli.squat_test or args_cli.push_test or args_cli.pull_test) and not navigating:
+                        source_index = min(source_index, trajectory.close_index)
                     pelvis_pose = _torch_pose_wxyz(
                         robot.data.body_link_pos_w[0, pelvis_id],
                         robot.data.body_link_quat_w[0, pelvis_id],
@@ -1113,6 +1540,71 @@ def main() -> None:
                             else 0.0
                         ),
                     )
+                    flat_palm_fraction = 0.0
+                    flat_palm_command = None
+                    if args_cli.flat_palm_grip and not navigating and realized_hold_wrist_world is None:
+                        blend_start = trajectory.close_index - int(args_cli.flat_palm_blend_steps)
+                        if source_index >= blend_start:
+                            i = source_index
+                            # Box pose the demo expects at this index (TRANSLATE retarget + hold lift margin)
+                            # position from the demo, orientation from this scene's Box (the Arena source Box frame is rotated)
+                            virtual_box = trajectory.box_world[i].copy()
+                            virtual_box[:3, :3] = box_initial_pose[:3, :3]
+                            virtual_box[:3, 3] += 0.5 * (
+                                retargeted.left_wrist_world[i][:3, 3] - trajectory.left_target_world[i][:3, 3]
+                                + retargeted.right_wrist_world[i][:3, 3] - trajectory.right_target_world[i][:3, 3]
+                            )
+                            lift_steps = max(1, trajectory.freeze_index - trajectory.lift_index)
+                            virtual_box[2, 3] += trajectory.hold_lift_margin_m * float(
+                                np.clip((i - trajectory.lift_index) / lift_steps, 0.0, 1.0)
+                            )
+                            closing = float(np.clip((i - trajectory.close_index + 1) / int(args_cli.flat_palm_close_steps), 0.0, 1.0))
+                            lateral = (1.0 - _smooth(closing)) * float(args_cli.flat_palm_out_m) - _smooth(closing) * float(args_cli.flat_palm_squeeze_m)
+                            approach = _smooth((i - blend_start + 1) / int(args_cli.flat_palm_blend_steps))
+                            # Hold the L shape from the start of the approach so the fingers never move during contact;
+                            # the Arena hand stays open (all zeros, itself L-shaped) so its fixed curled pose never kicks in.
+                            flat_palm_fraction = approach if i < trajectory.close_index else 1.0
+                            high_level_action[0:2] = 0.0
+                            inverse_pelvis = np.linalg.inv(pelvis_pose)
+                            if args_cli.flat_palm_stand_dist > 0.0 and i < trajectory.freeze_index:
+                                live_box = _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                                box_in_pelvis = inverse_pelvis @ live_box
+                                ex = float(box_in_pelvis[0, 3]) - float(args_cli.flat_palm_stand_dist)
+                                ey = float(box_in_pelvis[1, 3])
+                                flat_palm_command = np.zeros(3)
+                                if ex > 0.01:
+                                    flat_palm_command[0] = float(np.clip(3.0 * ex, 0.13, 0.25))
+                                    flat_palm_command[1] = float(np.clip(1.5 * ey, -0.08, 0.08))
+                            for side, position_slice, quaternion_slice in (("left", slice(2, 5), slice(5, 9)), ("right", slice(9, 12), slice(12, 16))):
+                                outward = 1.0 if side == "left" else -1.0
+                                offset = np.eye(4); offset[0, 3] = float(args_cli.flat_palm_dx); offset[1, 3] = outward * lateral
+                                grip = virtual_box @ offset @ FLAT_PALM_BOX_WRIST[side]
+                                if i < trajectory.close_index:
+                                    demo = np.eye(4)
+                                    demo[:3, 3] = high_level_action[position_slice]
+                                    demo[:3, :3] = Rotation.from_quat(high_level_action[quaternion_slice]).as_matrix()
+                                    grip = _interp_pose(pelvis_pose @ demo, grip, approach)
+                                if args_cli.flat_palm_feedback > 0.0:
+                                    wrist_id = left_wrist_id if side == "left" else right_wrist_id
+                                    if i < trajectory.close_index:
+                                        actual_wrist = _torch_pose_wxyz(robot.data.body_link_pos_w[0, wrist_id], robot.data.body_link_quat_w[0, wrist_id])
+                                        flat_palm_corr[side] = np.clip(
+                                            flat_palm_corr[side] + float(args_cli.flat_palm_feedback) * (grip[:3, 3] - actual_wrist[:3, 3]), -0.08, 0.08
+                                        )
+                                        rot_error = Rotation.from_matrix(grip[:3, :3] @ actual_wrist[:3, :3].T).as_rotvec()
+                                        flat_palm_corr_rot[side] = np.clip(flat_palm_corr_rot[side] + float(args_cli.flat_palm_feedback) * rot_error, -0.5, 0.5)
+                                    grip = grip.copy(); grip[:3, 3] += flat_palm_corr[side]
+                                    grip[:3, :3] = Rotation.from_rotvec(flat_palm_corr_rot[side]).as_matrix() @ grip[:3, :3]
+                                high_level_action[position_slice], high_level_action[quaternion_slice] = _matrix_to_action_pose(inverse_pelvis @ grip)
+                                if (i - blend_start) % 20 == 0 and side == "right":
+                                    live_box = _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                                    actual = _torch_pose_wxyz(robot.data.body_link_pos_w[0, right_wrist_id], robot.data.body_link_quat_w[0, right_wrist_id])
+                                    print(
+                                        f"[flat] i={i} close={trajectory.close_index} lift={trajectory.lift_index} vbox-live={np.round((virtual_box[:3,3]-live_box[:3,3])*100,1)}cm "
+                                        f"R target_in_box={np.round((np.linalg.inv(live_box)@grip)[:3,3]*100,1)} actual_in_box={np.round((np.linalg.inv(live_box)@actual)[:3,3]*100,1)} "
+                                        f"rot_err={np.degrees(Rotation.from_matrix(grip[:3,:3].T@actual[:3,:3]).magnitude()):.0f}deg box_ahead={(np.linalg.inv(pelvis_pose)@live_box)[0,3]:.3f}",
+                                        flush=True,
+                                    )
                     grasp_lift_scope = source_index >= trajectory.close_index
                     if navigating:
                         if navigation_hold is None:
@@ -1135,6 +1627,628 @@ def main() -> None:
                         if grasp_lift_scope
                         else camera_command.detach().cpu().numpy()
                     )
+                    if flat_palm_command is not None:
+                        high_level_action[16:19] = flat_palm_command
+                    if args_cli.hook_grasp and not navigating and source_index >= trajectory.close_index:
+                        if hook_start_step is None:
+                            hook_start_step = step
+                            for side, position_slice, quaternion_slice in (
+                                ("left", slice(2, 5), slice(5, 9)),
+                                ("right", slice(9, 12), slice(12, 16)),
+                            ):
+                                start_pelvis = np.eye(4)
+                                start_pelvis[:3, 3] = high_level_action[position_slice]
+                                start_pelvis[:3, :3] = Rotation.from_quat(
+                                    high_level_action[quaternion_slice]
+                                ).as_matrix()
+                                hook_start_wrist_pelvis[side] = start_pelvis
+                                hook_start_wrist_world[side] = pelvis_pose @ start_pelvis
+                        stepin_steps = int(args_cli.hook_stepin_steps)
+                        if step - hook_start_step < stepin_steps:
+                            # Step toward the table with the arms held in the pelvis frame.
+                            box_in_pelvis = np.linalg.inv(pelvis_pose) @ box_initial_pose
+                            distance_error = float(box_in_pelvis[0, 3]) - float(args_cli.hook_target_dist_m)
+                            for side, position_slice, quaternion_slice in (
+                                ("left", slice(2, 5), slice(5, 9)),
+                                ("right", slice(9, 12), slice(12, 16)),
+                            ):
+                                retracted = hook_start_wrist_pelvis[side].copy()
+                                retracted[:3, 3] = (0.22, 0.22 if side == "left" else -0.22, 0.10)
+                                widened = _interp_pose(
+                                    hook_start_wrist_pelvis[side],
+                                    retracted,
+                                    _smooth((step - hook_start_step + 1) / 40.0),
+                                )
+                                high_level_action[position_slice], high_level_action[quaternion_slice] = _matrix_to_action_pose(widened)
+                                hook_start_wrist_world[side] = pelvis_pose @ widened
+                            high_level_action[0:2] = 0.0
+                            walking = distance_error > 0.01 and step - hook_start_step >= 40
+                            high_level_action[16] = float(np.clip(1.5 * distance_error, 0.0, 0.25)) if walking else 0.0
+                            high_level_action[17] = float(np.clip(-1.5 * float(box_in_pelvis[1, 3]), -0.1, 0.1)) if walking else 0.0
+                            high_level_action[18] = 0.0
+                        hook_elapsed = step - hook_start_step - stepin_steps
+                        hook_p = int(args_cli.hook_phase_steps)
+                        tilt_goal = math.radians(float(args_cli.hook_tilt_deg))
+                    if args_cli.hook_grasp and hook_start_step is not None and step - hook_start_step >= int(args_cli.hook_stepin_steps):
+                        hook_elapsed = step - hook_start_step - int(args_cli.hook_stepin_steps)
+                        hook_p = int(args_cli.hook_phase_steps)
+                        tilt_goal = math.radians(float(args_cli.hook_tilt_deg))
+                        place_fraction = _smooth((hook_elapsed + 1) / (2 * hook_p))
+                        squeeze_fraction = _smooth((hook_elapsed - 2 * hook_p + 1) / hook_p)
+                        tilt_fraction = _smooth((hook_elapsed - 3 * hook_p + 1) / (3 * hook_p))
+                        lateral = (1.0 - squeeze_fraction) * float(args_cli.hook_open_m) - squeeze_fraction * float(args_cli.hook_squeeze_m)
+                        inverse_pelvis = np.linalg.inv(pelvis_pose)
+                        desired_box = _hook_box_pose(box_initial_pose, tilt_fraction * tilt_goal)
+                        if args_cli.hook_hug:
+                            pull_fraction = _smooth((hook_elapsed - 6 * hook_p + 1) / (2 * hook_p))
+                            hug_fraction = _smooth((hook_elapsed - 8 * hook_p + 1) / (3 * hook_p))
+                            pulled = np.eye(4)
+                            pulled[:3, 3] = (-float(args_cli.hook_pull_m) * pull_fraction, 0.0, float(args_cli.hook_lift_m) * pull_fraction)
+                            desired_box = pulled @ desired_box
+                            if hug_fraction > 0.0:
+                                hug_pelvis = np.eye(4)
+                                hug_pelvis[:3, :3] = Rotation.from_euler("y", -math.radians(float(args_cli.hook_hug_tilt_deg))).as_matrix()
+                                hug_pelvis[:3, 3] = (float(args_cli.hook_hug_pos[0]), 0.0, float(args_cli.hook_hug_pos[1]))
+                                if hook_hug_anchor is None:
+                                    hook_hug_anchor = desired_box.copy()
+                                desired_box = _interp_pose(hook_hug_anchor, pelvis_pose @ hug_pelvis, hug_fraction)
+                        for side, position_slice, quaternion_slice in (
+                            ("left", slice(2, 5), slice(5, 9)),
+                            ("right", slice(9, 12), slice(12, 16)),
+                        ):
+                            outward = 1.0 if side == "left" else -1.0
+                            hand_offset = np.eye(4)
+                            hand_offset[:3, 3] = (float(args_cli.hook_slide_m), outward * lateral, -float(args_cli.hook_lower_m))
+                            goal = desired_box @ hand_offset @ HOOK_BOX_WRIST[side]
+                            world = _interp_pose(hook_start_wrist_world[side], goal, place_fraction) if place_fraction < 1.0 else goal
+                            high_level_action[position_slice], high_level_action[quaternion_slice] = _matrix_to_action_pose(inverse_pelvis @ world)
+                        high_level_action[0:2] = 0.0
+                        high_level_action[16:19] = 0.0
+                        if args_cli.hook_hold_base:
+                            box_in_pelvis = inverse_pelvis @ box_initial_pose
+                            distance_error = float(box_in_pelvis[0, 3]) - float(args_cli.hook_target_dist_m)
+                            high_level_action[16] = float(np.clip(1.5 * distance_error, -0.15, 0.20))
+                        high_level_action[21] = float(args_cli.hook_torso_pitch_rad) * _smooth((hook_elapsed + 1) / (2 * hook_p))
+                    if args_cli.pull_test and not navigating and source_index >= trajectory.close_index:
+                        if pl_start is None:
+                            pl_start = step
+                            pl["heading0"] = float(Rotation.from_matrix(pelvis_pose[:3, :3]).as_euler("zyx")[0])
+                            for side, position_slice, quaternion_slice in (("left", slice(2, 5), slice(5, 9)), ("right", slice(9, 12), slice(12, 16))):
+                                start = np.eye(4)
+                                start[:3, 3] = high_level_action[position_slice]
+                                start[:3, :3] = Rotation.from_quat(high_level_action[quaternion_slice]).as_matrix()
+                                retracted = start.copy()
+                                retracted[:3, 3] = (0.15, 0.25 if side == "left" else -0.25, 0.18)
+                                pl[side] = (start, retracted)
+                        e = step - pl_start
+                        box_now = _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                        inverse_pelvis = np.linalg.inv(pelvis_pose)
+                        box_in_pelvis = inverse_pelvis @ box_now
+                        high_level_action[16:19] = 0.0
+                        hand_close = 0.0
+                        targets = {}
+
+                        def base_hold(min_speed: float = 0.06, dist: float | None = None, deadband: float = 0.0) -> None:
+                            ex = float(box_in_pelvis[0, 3]) - float(args_cli.pull_box_dist if dist is None else dist)
+                            ey = float(box_in_pelvis[1, 3])
+                            if abs(ex) < deadband and abs(ey) < deadband:
+                                return
+                            heading = float(Rotation.from_matrix(pelvis_pose[:3, :3]).as_euler("zyx")[0])
+                            yaw_error = math.atan2(math.sin(pl["heading0"] - heading), math.cos(pl["heading0"] - heading))
+                            gain = float(args_cli.pull_base_gain)
+                            vx = float(np.clip(gain * ex, -0.2, 0.2)); vy = float(np.clip(gain * ey, -0.12, 0.12))
+                            norm = math.hypot(vx, vy)
+                            if norm < min_speed:
+                                vx, vy = (vx * min_speed / norm, vy * min_speed / norm) if norm > 1e-3 else (-min_speed, 0.0)
+                            high_level_action[16] = vx; high_level_action[17] = vy
+                            high_level_action[18] = float(np.clip(1.5 * yaw_error, -0.3, 0.3))
+
+                        if args_cli.pull_by_walking:
+                            box_z_rel = float(box_in_pelvis[2, 3])
+                            final_box = np.eye(4)
+                            final_box[:3, 3] = (float(args_cli.pull_box_dist), 0.0, box_z_rel + float(args_cli.pull_hand_dz))
+                            if "hook_pelvis" not in pl:
+                                pl["hook_pelvis"] = {}
+                                for side in ("left", "right"):
+                                    outward = 1.0 if side == "left" else -1.0
+                                    for name, lateral in (("open", float(args_cli.pull_open_lateral)), ("closed", float(args_cli.pull_closed_lateral))):
+                                        off = np.eye(4); off[:3, 3] = (float(args_cli.pull_slide_m), outward * lateral, 0.0)
+                                        pl["hook_pelvis"][(side, name)] = final_box @ off @ HOOK_BOX_WRIST[side]
+                            ex = float(box_in_pelvis[0, 3]) - float(args_cli.pull_box_dist)
+                            ey = float(box_in_pelvis[1, 3])
+                            stage = pl.get("stage", "extend")
+                            if stage == "extend":
+                                f = _smooth((e + 1) / 150)
+                                for side in ("left", "right"):
+                                    targets[side] = pelvis_pose @ _interp_pose(pl[side][0], pl["hook_pelvis"][(side, "open")], f)
+                                if e >= 200:
+                                    pl["stage"] = "walk_in"; pl["stage_e"] = e
+                            elif stage == "walk_in":
+                                for side in ("left", "right"):
+                                    targets[side] = pelvis_pose @ pl["hook_pelvis"][(side, "open")]
+                                if (abs(ex) < 0.012 and abs(ey) < 0.015) or e - pl["stage_e"] > 300:
+                                    pl["stage"] = "close"; pl["stage_e"] = e
+                                else:
+                                    base_hold(float(args_cli.pull_walkin_min_speed))
+                            elif stage == "close":
+                                f = _smooth((e - pl["stage_e"] + 1) / 75)
+                                for side in ("left", "right"):
+                                    targets[side] = pelvis_pose @ _interp_pose(pl["hook_pelvis"][(side, "open")], pl["hook_pelvis"][(side, "closed")], f)
+                                hand_close = f
+                                if e - pl["stage_e"] >= 75:
+                                    pl["stage"] = "walk_back"; pl["stage_e"] = e
+                                    pl["box_start_x"] = float(box_now[0, 3])
+                                    pl["pelvis_start"] = pelvis_pose.copy()
+                            elif stage in ("release", "around", "preshape", "insert", "squeeze", "walk2", "lift", "hold2"):
+                                k = e - pl["stage_e"]
+                                if "tf_box" not in pl:
+                                    pl["tf_box"] = box_now.copy()
+                                    pl["tf_start"] = {side: pelvis_pose @ pl["hook_pelvis"][(side, "closed")] for side in ("left", "right")}
+                                    pl["finger_goal"] = dict(THREE_FACE_HAND)
+                                    pl["finger_frac"] = 0.0
+
+                                def tf_pose(side: str, dx: float = 0.0, dy_out: float = 0.0, dz: float = 0.0) -> np.ndarray:
+                                    outward = 1.0 if side == "left" else -1.0
+                                    off = np.eye(4); off[:3, 3] = (dx, outward * dy_out, dz)
+                                    lift = np.eye(4); lift[2, 3] = float(args_cli.pull2_dz)
+                                    return lift @ pl["tf_box"] @ off @ THREE_FACE_BOX_WRIST[side]
+
+                                def advance(next_stage: str, length: int) -> None:
+                                    if k >= length:
+                                        pl["stage"] = next_stage; pl["stage_e"] = e
+                                        pl["tf_from"] = {side: targets[side].copy() for side in ("left", "right")}
+
+                                hand_close = 0.0
+                                if stage in ("around", "preshape", "insert", "squeeze"):
+                                    base_hold(0.06, float(args_cli.pull2_stand_dist), 0.02)
+                                if stage == "release":
+                                    # open the hand and back the wrists out sideways
+                                    # slide out 9 cm with the hand still closed (fingers clear the far corners),
+                                    # then open in free space, then rise 3 cm
+                                    for side in ("left", "right"):
+                                        outward = 1.0 if side == "left" else -1.0
+                                        out1 = pl["tf_start"][side].copy(); out1[1, 3] += outward * 0.09
+                                        out2 = out1.copy(); out2[2, 3] += 0.03
+                                        targets[side] = (
+                                            _interp_pose(pl["tf_start"][side], out1, _smooth((k + 1) / 60))
+                                            if k < 90
+                                            else _interp_pose(out1, out2, _smooth((k - 89) / 30))
+                                        )
+                                    hand_close = 1.0 if k < 60 else 1.0 - _smooth((k - 59) / 30)
+                                    advance("around", 120)
+                                elif stage == "around":
+                                    # swing to the outside-front of the near face, shaping the hand on the way
+                                    if k == 0:
+                                        pl["tf_box"] = box_now.copy()
+                                    for side in ("left", "right"):
+                                        targets[side] = _interp_pose(pl["tf_from"][side], tf_pose(side, -0.09, 0.12), _smooth((k + 1) / 120))
+                                    advance("preshape", 120)
+                                elif stage == "preshape":
+                                    for side in ("left", "right"):
+                                        targets[side] = _interp_pose(pl["tf_from"][side], tf_pose(side, -0.09, 0.0), _smooth((k + 1) / 80))
+                                    # shape the hand only once it is clear in front of the near face
+                                    pl["finger_frac"] = _smooth((k + 1) / 80)
+                                    advance("insert", 80)
+                                elif stage == "insert":
+                                    # slide in: middle goes under the bottom, thumb meets the near face;
+                                    # stop where we are as soon as the Box starts to be pushed
+                                    if "insert_box" not in pl:
+                                        pl["insert_box"] = box_now.copy()
+                                    pushed = float(np.linalg.norm(box_now[:2, 3] - pl["insert_box"][:2, 3])) > 0.008
+                                    if pushed and "insert_hold" not in pl and "last_insert" in pl:
+                                        pl["insert_hold"] = {side: pl["last_insert"][side].copy() for side in ("left", "right")}
+                                        print(f"[pull]   insert stopped at k={k}: Box pushed", flush=True)
+                                    for side in ("left", "right"):
+                                        if "insert_hold" in pl:
+                                            targets[side] = pl["insert_hold"][side]
+                                        else:
+                                            targets[side] = _interp_pose(
+                                                pl["tf_from"][side], tf_pose(side, float(args_cli.pull2_insert_dx)), _smooth((k + 1) / int(args_cli.pull2_insert_steps))
+                                            )
+                                    pl["last_insert"] = {side: targets[side].copy() for side in ("left", "right")}
+                                    if "insert_hold" in pl and k < int(args_cli.pull2_insert_steps):
+                                        k = int(args_cli.pull2_insert_steps)
+                                    advance("squeeze", int(args_cli.pull2_insert_steps))
+                                elif stage == "squeeze":
+                                    squeeze = float(args_cli.pull2_squeeze_m)
+                                    for side in ("left", "right"):
+                                        outward = 1.0 if side == "left" else -1.0
+                                        squeezed = pl["tf_from"][side].copy(); squeezed[:3, 3] -= outward * squeeze * pl["tf_box"][:3, 1]
+                                        targets[side] = _interp_pose(pl["tf_from"][side], squeezed, _smooth((k + 1) / 40))
+                                    if k >= 40:
+                                        pl["tf_pelvis"] = {side: np.linalg.inv(pelvis_pose) @ targets[side] for side in ("left", "right")}
+                                        pl["pelvis_start2"] = pelvis_pose.copy()
+                                    advance("walk2", 40)
+                                elif stage == "walk2":
+                                    for side in ("left", "right"):
+                                        targets[side] = pelvis_pose @ pl["tf_pelvis"][side]
+                                    travelled = float(np.linalg.norm(pelvis_pose[:2, 3] - pl["pelvis_start2"][:2, 3]))
+                                    if travelled < float(args_cli.pull2_distance_m) and k < 400:
+                                        heading = float(Rotation.from_matrix(pelvis_pose[:3, :3]).as_euler("zyx")[0])
+                                        yaw_error = math.atan2(math.sin(pl["heading0"] - heading), math.cos(pl["heading0"] - heading))
+                                        high_level_action[16] = -0.10
+                                        high_level_action[17] = float(np.clip(1.0 * ey, -0.08, 0.08))
+                                        high_level_action[18] = float(np.clip(1.5 * yaw_error, -0.3, 0.3))
+                                    else:
+                                        pl["stage"] = "lift"; pl["stage_e"] = e
+                                elif stage == "lift":
+                                    for side in ("left", "right"):
+                                        raised = pl["tf_pelvis"][side].copy(); raised[2, 3] += float(args_cli.pull2_lift_m) * _smooth((k + 1) / 100)
+                                        targets[side] = pelvis_pose @ raised
+                                    advance("hold2", 100)
+                                else:
+                                    for side in ("left", "right"):
+                                        raised = pl["tf_pelvis"][side].copy(); raised[2, 3] += float(args_cli.pull2_lift_m)
+                                        targets[side] = pelvis_pose @ raised
+                            else:
+                                for side in ("left", "right"):
+                                    targets[side] = pelvis_pose @ pl["hook_pelvis"][(side, "closed")]
+                                hand_close = 1.0
+                                travelled = float(np.linalg.norm(pelvis_pose[:2, 3] - pl["pelvis_start"][:2, 3]))
+                                if stage == "walk_back" and travelled < float(args_cli.pull_distance_m) and e - pl["stage_e"] < 400:
+                                    heading = float(Rotation.from_matrix(pelvis_pose[:3, :3]).as_euler("zyx")[0])
+                                    yaw_error = math.atan2(math.sin(pl["heading0"] - heading), math.cos(pl["heading0"] - heading))
+                                    high_level_action[16] = -0.10
+                                    high_level_action[17] = float(np.clip(1.0 * ey, -0.08, 0.08))
+                                    high_level_action[18] = float(np.clip(1.5 * yaw_error, -0.3, 0.3))
+                                elif stage == "walk_back" and args_cli.pull_regrasp_three_face:
+                                    pl["stage"] = "settle"; pl["stage_e"] = e
+                                elif stage == "settle":
+                                    if e - pl["stage_e"] >= 50:
+                                        pl["stage"] = "release"; pl["stage_e"] = e
+                                else:
+                                    pl["stage"] = "hold"
+                            if args_cli.pull2_wrist_feedback > 0.0 and pl.get("stage") in ("around", "preshape", "insert", "squeeze", "walk2", "lift", "hold2"):
+                                corr = pl.setdefault("wrist_corr", {"left": np.zeros(3), "right": np.zeros(3)})
+                                corr_rot = pl.setdefault("wrist_corr_rot", {"left": np.zeros(3), "right": np.zeros(3)})
+                                for side, wrist_id in (("left", left_wrist_id), ("right", right_wrist_id)):
+                                    if pl["stage"] in ("around", "preshape", "insert"):
+                                        actual = _torch_pose_wxyz(robot.data.body_link_pos_w[0, wrist_id], robot.data.body_link_quat_w[0, wrist_id])
+                                        gain = float(args_cli.pull2_wrist_feedback)
+                                        position_error = targets[side][:3, 3] - actual[:3, 3]
+                                        if pl["stage"] == "insert":
+                                            position_error[:2] = 0.0  # in contact range: correct sag only, never push forward
+                                        corr[side] = np.clip(corr[side] + gain * position_error, -0.08, 0.08)
+                                        rot_error = Rotation.from_matrix(targets[side][:3, :3] @ actual[:3, :3].T).as_rotvec()
+                                        corr_rot[side] = np.clip(corr_rot[side] + gain * rot_error, -0.6, 0.6)
+                                    targets[side] = targets[side].copy()
+                                    targets[side][:3, 3] += corr[side]
+                                    targets[side][:3, :3] = Rotation.from_rotvec(corr_rot[side]).as_matrix() @ targets[side][:3, :3]
+                                if e % 25 == 0:
+                                    print(
+                                        f"[pull]   wrist correction L={np.round(corr['left'], 3)} R={np.round(corr['right'], 3)} "
+                                        f"rot(deg) L={np.round(np.degrees(corr_rot['left']), 1)} R={np.round(np.degrees(corr_rot['right']), 1)}",
+                                        flush=True,
+                                    )
+                            pl["arrive"] = pl.get("arrive", 0)
+                        elif e < 50 or "arrive" not in pl:
+                            for side in ("left", "right"):
+                                start, retracted = pl[side]
+                                targets[side] = pelvis_pose @ _interp_pose(start, retracted, _smooth((e + 1) / 50))
+                            if e >= 50:
+                                ex = float(box_in_pelvis[0, 3]) - float(args_cli.pull_box_dist)
+                                ey = float(box_in_pelvis[1, 3])
+                                if (abs(ex) < 0.015 and abs(ey) < 0.015) or e >= 350:
+                                    pl["arrive"] = e
+                                    pl["reach_box"] = box_now.copy()
+                                    pl["reach_start"] = {side: pelvis_pose @ pl[side][1] for side in ("left", "right")}
+                                else:
+                                    base_hold()
+                        if "arrive" in pl and not args_cli.pull_by_walking:
+                            k = e - pl["arrive"]
+
+                            def hook_target(box_pose: np.ndarray, side: str, lateral: float, pull: float = 0.0) -> np.ndarray:
+                                outward = 1.0 if side == "left" else -1.0
+                                off = np.eye(4); off[:3, 3] = (float(args_cli.pull_slide_m) - pull, outward * lateral, 0.0)
+                                return box_pose @ off @ HOOK_BOX_WRIST[side]
+
+                            for side in ("left", "right"):
+                                if k < 100:
+                                    targets[side] = _interp_pose(pl["reach_start"][side], hook_target(pl["reach_box"], side, 0.04), _smooth((k + 1) / 100))
+                                elif k < 150:
+                                    f = _smooth((k - 99) / 50)
+                                    targets[side] = hook_target(pl["reach_box"], side, (1 - f) * 0.04 - f * 0.005)
+                                    hand_close = f
+                                elif k < 400:
+                                    f = _smooth((k - 149) / 250)
+                                    targets[side] = hook_target(pl["reach_box"], side, -0.005, f * float(args_cli.pull_distance_m))
+                                    hand_close = 1.0
+                                else:
+                                    targets[side] = hook_target(pl["reach_box"], side, -0.005, float(args_cli.pull_distance_m))
+                                    hand_close = 1.0
+                            base_hold()
+                        for side, position_slice, quaternion_slice in (("left", slice(2, 5), slice(5, 9)), ("right", slice(9, 12), slice(12, 16))):
+                            high_level_action[position_slice], high_level_action[quaternion_slice] = _matrix_to_action_pose(inverse_pelvis @ targets[side])
+                        high_level_action[0:2] = hand_close
+                        pl["curl"] = hand_close
+                        if e % 25 == 0:
+                            yaw = math.degrees(Rotation.from_matrix(box_now[:3, :3]).as_euler("zyx")[0])
+                            overhang = (float(table_xy[0]) - 0.20) - (float(box_now[0, 3]) - 0.5 * float(args_cli.box_size))
+                            print(
+                                f"[pull] e={e:4d} phase={pl.get('stage', 'approach' if 'arrive' not in pl else 'k='+str(e - pl['arrive']))} "
+                                f"box_xy=({box_now[0,3]:.3f},{box_now[1,3]:+.3f}) box_yaw={yaw:+.1f} box_ahead={box_in_pelvis[0,3]:.3f} "
+                                f"near_overhang={overhang*100:+.1f}cm box_z={box_now[2,3]:.3f} contacts L{left_count} R{right_count} pelvis_x={pelvis_pose[0,3]:.3f} frame={video_frame_count}",
+                                flush=True,
+                            )
+                            inverse_box = np.linalg.inv(box_now)
+                            for tip in ("left_hand_index_1_link", "left_hand_thumb_2_link", "right_hand_index_1_link", "right_hand_thumb_2_link"):
+                                tip_id = _body_ids(robot, (tip,))[0]
+                                tip_box = inverse_box @ np.append(robot.data.body_link_pos_w[0, tip_id].detach().cpu().numpy(), 1.0)
+                                print(f"[pull]   {tip} box-frame=({tip_box[0]:+.3f},{tip_box[1]:+.3f},{tip_box[2]:+.3f})", flush=True)
+                            for side, wrist_id in (("left", left_wrist_id), ("right", right_wrist_id)):
+                                actual = inverse_pelvis @ _torch_pose_wxyz(robot.data.body_link_pos_w[0, wrist_id], robot.data.body_link_quat_w[0, wrist_id])
+                                wanted = inverse_pelvis @ targets[side]
+                                print(
+                                    f"[pull]   {side} wrist pelvis-frame actual=({actual[0,3]:.3f},{actual[1,3]:+.3f},{actual[2,3]:+.3f}) "
+                                    f"target=({wanted[0,3]:.3f},{wanted[1,3]:+.3f},{wanted[2,3]:+.3f})",
+                                    flush=True,
+                                )
+                    if args_cli.push_test and not navigating and source_index >= trajectory.close_index:
+                        if pu_start is None:
+                            pu_start = step
+                            for side, position_slice, quaternion_slice in (("left", slice(2, 5), slice(5, 9)), ("right", slice(9, 12), slice(12, 16))):
+                                start = np.eye(4)
+                                start[:3, 3] = high_level_action[position_slice]
+                                start[:3, :3] = Rotation.from_quat(high_level_action[quaternion_slice]).as_matrix()
+                                retracted = start.copy()
+                                retracted[:3, 3] = (0.15, 0.25, 0.18) if side == "left" else (0.12, -0.25, 0.10)
+                                pu[side] = (start, retracted)
+                        e = step - pu_start
+                        box_now = _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                        inverse_pelvis = np.linalg.inv(pelvis_pose)
+                        high_level_action[0:2] = 0.0
+                        high_level_action[16:19] = 0.0
+                        # right arm stays retracted throughout
+                        start_r, retracted_r = pu["right"]
+                        high_level_action[9:12], high_level_action[12:16] = _matrix_to_action_pose(_interp_pose(start_r, retracted_r, _smooth((e + 1) / 50)))
+                        start_l, retracted_l = pu["left"]
+                        left_pelvis = _interp_pose(start_l, retracted_l, _smooth((e + 1) / 50))
+                        table_center_w = np.eye(4)
+                        table_center_w[:3, 3] = (float(table_xy[0]), float(table_xy[1]), 0.74)
+                        table_in_pelvis = inverse_pelvis @ table_center_w
+                        walk_end = pu.get("walk_end")
+                        if e >= 50 and walk_end is None:
+                            ex = float(table_in_pelvis[0, 3]) - float(args_cli.push_stance[0])
+                            ey = float(table_in_pelvis[1, 3]) - float(args_cli.push_stance[1])
+                            if (abs(ex) < 0.015 and abs(ey) < 0.015) or e >= 350:
+                                pu["walk_end"] = e
+                                pu["box0"] = box_now.copy()
+                                pu["left_start_w"] = pelvis_pose @ left_pelvis
+                            else:
+                                vx = float(np.clip(1.5 * ex, -0.15, 0.25)); vy = float(np.clip(1.5 * ey, -0.15, 0.15))
+                                norm = np.hypot(vx, vy)
+                                if norm < 0.06:
+                                    vx, vy = vx * 0.06 / max(norm, 1e-6), vy * 0.06 / max(norm, 1e-6)
+                                high_level_action[16] = vx; high_level_action[17] = vy
+                        walk_end = pu.get("walk_end")
+                        if walk_end is None:
+                            high_level_action[2:5], high_level_action[5:9] = _matrix_to_action_pose(left_pelvis)
+                        else:
+                            k = e - walk_end
+                            def left_target(y_off, z_off=0.0):
+                                off = np.eye(4); off[:3, 3] = (float(args_cli.push_hand_x), y_off, z_off)
+                                rot = np.eye(4); rot[:3, :3] = HOOK_BOX_WRIST["left"][:3, :3]
+                                return pu["box0"] @ off @ rot
+                            y_contact = 0.122
+                            if k < 100:
+                                world = _interp_pose(pu["left_start_w"], left_target(y_contact + 0.05), _smooth((k + 1) / 100))
+                            elif k < 150:
+                                world = _interp_pose(left_target(y_contact + 0.05), left_target(y_contact), _smooth((k - 99) / 50))
+                            elif k < 350 and not pu.get("pushed", False):
+                                # Closed loop: keep the palm 2 cm "inside" the Box's current left face,
+                                # yaw-aligned with the Box, until it has travelled the push distance.
+                                travelled = float(pu["box0"][1, 3]) - float(box_now[1, 3])
+                                if travelled >= float(args_cli.push_distance_m):
+                                    pu["pushed"] = True
+                                    pu["box_pushed"] = box_now.copy()
+                                yaw_now = Rotation.from_matrix(box_now[:3, :3]).as_euler("zyx")[0]
+                                frame = np.eye(4)
+                                frame[:3, :3] = Rotation.from_euler("z", yaw_now).as_matrix()
+                                frame[:3, 3] = box_now[:3, 3]
+                                off = np.eye(4); off[:3, 3] = (float(args_cli.push_hand_x), y_contact - 0.02, 0.0)
+                                rot = np.eye(4); rot[:3, :3] = HOOK_BOX_WRIST["left"][:3, :3]
+                                world = frame @ off @ rot
+                                pu["last_push_world"] = world
+                            else:
+                                pu.setdefault("release_k", k)
+                                start_w = pu.get("last_push_world", left_target(y_contact))
+                                away = start_w.copy(); away[1, 3] += 0.06; away[2, 3] += 0.05
+                                world = _interp_pose(start_w, away, _smooth((k - pu["release_k"] + 1) / 50))
+                            high_level_action[2:5], high_level_action[5:9] = _matrix_to_action_pose(inverse_pelvis @ world)
+                            if args_cli.hold_base_walk:
+                                ex = float(table_in_pelvis[0, 3]) - float(args_cli.push_stance[0])
+                                ey = float(table_in_pelvis[1, 3]) - float(args_cli.push_stance[1])
+                                heading_error = math.atan2(float(table_in_pelvis[1, 3]), float(table_in_pelvis[0, 3])) - math.atan2(float(args_cli.push_stance[1]), float(args_cli.push_stance[0]))
+                                vx = float(np.clip(2.0 * ex, -0.2, 0.2)); vy = float(np.clip(2.0 * ey, -0.15, 0.15))
+                                norm = math.hypot(vx, vy)
+                                if norm < 0.06:
+                                    if norm < 1e-3:
+                                        vx, vy = 0.06, 0.0
+                                    else:
+                                        vx, vy = vx * 0.06 / norm, vy * 0.06 / norm
+                                high_level_action[16] = vx
+                                high_level_action[17] = vy
+                                high_level_action[18] = float(np.clip(1.5 * heading_error, -0.3, 0.3))
+                        if e % 25 == 0:
+                            yaw = math.degrees(Rotation.from_matrix(box_now[:3, :3]).as_euler("zyx")[0])
+                            tilt = math.degrees(Rotation.from_matrix(box_now[:3, :3]).magnitude() if False else 0.0)
+                            rp = Rotation.from_matrix(box_now[:3, :3]).as_euler("xyz")
+                            overhang = -(float(box_now[1, 3]) - float(table_xy[1])) + 0.5 * float(args_cli.box_size) - 0.20
+                            print(
+                                f"[push] e={e:4d} phase={'walk' if pu.get('walk_end') is None else ('k='+str(e-pu['walk_end']))} box_xy=({box_now[0,3]:.3f},{box_now[1,3]:+.3f}) "
+                                f"box_yaw={yaw:+.1f} box_roll_pitch=({math.degrees(rp[0]):+.1f},{math.degrees(rp[1]):+.1f}) overhang={overhang*100:+.1f}cm "
+                                f"pelvis_xy=({pelvis_pose[0,3]:.3f},{pelvis_pose[1,3]:+.3f}) table_in_pelvis=({table_in_pelvis[0,3]:+.3f},{table_in_pelvis[1,3]:+.3f}) contacts L{left_count}",
+                                flush=True,
+                            )
+                    if args_cli.squat_test and not navigating and source_index >= trajectory.close_index:
+                        if sq_start is None:
+                            sq_start = step
+                            for side, position_slice, quaternion_slice in (("left", slice(2, 5), slice(5, 9)), ("right", slice(9, 12), slice(12, 16))):
+                                start = np.eye(4)
+                                start[:3, 3] = high_level_action[position_slice]
+                                start[:3, :3] = Rotation.from_quat(high_level_action[quaternion_slice]).as_matrix()
+                                retracted = start.copy()
+                                retracted[:3, 3] = (0.15, 0.24 if side == "left" else -0.24, 0.05)
+                                sq[side] = (start, retracted)
+                        e = step - sq_start
+                        for side, position_slice, quaternion_slice in (("left", slice(2, 5), slice(5, 9)), ("right", slice(9, 12), slice(12, 16))):
+                            start, retracted = sq[side]
+                            high_level_action[position_slice], high_level_action[quaternion_slice] = _matrix_to_action_pose(_interp_pose(start, retracted, _smooth((e + 1) / 50)))
+                        high_level_action[0:2] = 0.0
+                        high_level_action[16:19] = 0.0
+                        table_center_w = np.eye(4)
+                        table_center_w[:3, 3] = (float(table_xy[0]), float(table_xy[1]), 0.74)
+                        table_in_pelvis = np.linalg.inv(pelvis_pose) @ table_center_w
+                        ex = float(table_in_pelvis[0, 3]) - float(args_cli.squat_stance[0])
+                        ey = float(table_in_pelvis[1, 3]) - float(args_cli.squat_stance[1])
+                        if 50 <= e < 350 and not sq.get("arrived", False):
+                            if abs(ex) < 0.015 and abs(ey) < 0.015:
+                                sq["arrived"] = True
+                                sq["arrive_step"] = e
+                            else:
+                                high_level_action[16] = float(np.clip(1.5 * ex, -0.15, 0.25))
+                                high_level_action[17] = float(np.clip(1.5 * ey, -0.15, 0.15))
+                                if np.hypot(high_level_action[16], high_level_action[17]) < 0.06:
+                                    scale = 0.06 / max(1e-6, np.hypot(high_level_action[16], high_level_action[17]))
+                                    high_level_action[16] *= scale
+                                    high_level_action[17] *= scale
+                        if e >= 350 or sq.get("arrived", False):
+                            sq.setdefault("squat_start", e)
+                            f = _smooth((e - sq["squat_start"] + 1) / 100)
+                            high_level_action[19] = 0.75 + f * (float(args_cli.squat_height) - 0.75)
+                            high_level_action[21] = f * float(args_cli.squat_pitch)
+                        if e % 25 == 0:
+                            _rpy = Rotation.from_matrix(pelvis_pose[:3, :3]).as_euler("xyz")
+                            torso_id = robot.find_bodies("torso_link")[0][0]
+                            _torso = robot.data.body_link_pos_w[0, torso_id].detach().cpu().numpy()
+                            print(
+                                f"[squat] e={e:4d} pelvis_z={pelvis_pose[2,3]:.3f} pelvis_rp=({math.degrees(_rpy[0]):+.1f},{math.degrees(_rpy[1]):+.1f})deg "
+                                f"table_in_pelvis=({table_in_pelvis[0,3]:+.3f},{table_in_pelvis[1,3]:+.3f}) cmd_h={high_level_action[19]:.3f} cmd_pitch={high_level_action[21]:.2f} "
+                                f"torso_xyz=({_torso[0]:.3f},{_torso[1]:.3f},{_torso[2]:.3f}) arrived={sq.get('arrived', False)}",
+                                flush=True,
+                            )
+                    if rg_start is not None:
+                        settled_height = 0.74 + 0.5 * float(args_cli.box_size)
+                        if _regrasp_phase(step - rg_start)[0] == "open" and not rg.get("released", False):
+                            if float(box.data.root_link_pos_w[0, 2]) - settled_height > 0.015 and rg.get("wait", 0) < 150:
+                                rg["wait"] = rg.get("wait", 0) + 1
+                                rg_start += 1  # hold the timeline in 'settle' until the Box rests on the table
+                            else:
+                                rg["released"] = True
+                        phase, k, length = _regrasp_phase(step - rg_start)
+                        frac = _smooth((k + 1) / length)
+                        inverse_pelvis = np.linalg.inv(pelvis_pose)
+                        box_now = _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                        high_level_action[16:19] = 0.0
+                        targets = {}
+                        hand_close = 1.0
+                        if phase in ("place", "settle"):
+                            desired_box = _interp_pose(rg["anchor_box"], rg["place_box"], frac if phase == "place" else 1.0)
+                            for side in ("left", "right"):
+                                targets[side] = desired_box @ rg["grip"][side]
+                        elif phase in ("open", "retract", "stepin"):
+                            if "placed_box" not in rg:
+                                rg["placed_box"] = box_now.copy()
+                            for side in ("left", "right"):
+                                outward = 1.0 if side == "left" else -1.0
+                                opened = np.eye(4)
+                                opened[:3, 3] = (0.0, outward * 0.05, 0.0)
+                                raised = np.eye(4)
+                                raised[:3, 3] = (0.0, outward * 0.08, 0.12)
+                                open_world = rg["placed_box"] @ opened @ rg["grip"][side]
+                                raised_world = rg["placed_box"] @ raised @ rg["grip"][side]
+                                if phase == "open":
+                                    targets[side] = _interp_pose(rg["placed_box"] @ rg["grip"][side], open_world, frac)
+                                elif phase == "retract":
+                                    targets[side] = _interp_pose(open_world, raised_world, frac)
+                                else:
+                                    targets[side] = raised_world
+                                rg.setdefault("raised_world", {})[side] = raised_world
+                            if phase == "stepin":
+                                box_in_pelvis = inverse_pelvis @ box_now
+                                error = float(box_in_pelvis[0, 3]) - float(args_cli.regrasp_target_dist_m)
+                                if error > 0.01:
+                                    high_level_action[16] = float(np.clip(1.5 * error, 0.06, 0.25))
+                                    high_level_action[17] = float(np.clip(-1.5 * float(box_in_pelvis[1, 3]), -0.1, 0.1))
+                            hand_close = 0.0
+                        elif phase in ("reach", "squeeze"):
+                            if "reach_box" not in rg:
+                                rg["reach_box"] = box_now.copy()
+                                rg["reach_start"] = dict(rg["raised_world"])
+                            for side in ("left", "right"):
+                                outward = 1.0 if side == "left" else -1.0
+                                lateral = float(args_cli.regrasp_open_m) if phase == "reach" else (1.0 - frac) * float(args_cli.regrasp_open_m) - frac * float(args_cli.regrasp_squeeze_m)
+                                offset = np.eye(4)
+                                offset[:3, 3] = (float(args_cli.regrasp_slide_m), outward * lateral, float(args_cli.regrasp_reach_dz_m))
+                                goal = rg["reach_box"] @ offset @ rg["grip"][side]
+                                targets[side] = _interp_pose(rg["reach_start"][side], goal, frac) if phase == "reach" else goal
+                                if phase == "squeeze" and k == length - 1:
+                                    rg.setdefault("regrip", {})[side] = np.linalg.inv(box_now) @ goal
+                            hand_close = 0.0 if phase == "reach" else frac
+                        elif phase in ("hug", "hold", "done"):
+                            if "hug_anchor" not in rg:
+                                rg["hug_anchor"] = box_now.copy()
+                                if "regrip" not in rg:
+                                    rg["regrip"] = {side: np.linalg.inv(box_now) @ (rg["reach_box"] @ np.eye(4) @ rg["grip"][side]) for side in ("left", "right")}
+                            hx, hz, htilt = (float(v) for v in args_cli.regrasp_hug_pose)
+                            hug_goal = np.eye(4)
+                            hug_goal[:3, :3] = Rotation.from_euler("y", -math.radians(htilt)).as_matrix()
+                            hug_goal[:3, 3] = (hx, 0.0, hz)
+                            desired_box = _interp_pose(rg["hug_anchor"], pelvis_pose @ hug_goal, frac if phase == "hug" else 1.0)
+                            for side in ("left", "right"):
+                                targets[side] = desired_box @ rg["regrip"][side]
+                        for side, position_slice, quaternion_slice in (
+                            ("left", slice(2, 5), slice(5, 9)),
+                            ("right", slice(9, 12), slice(12, 16)),
+                        ):
+                            high_level_action[position_slice], high_level_action[quaternion_slice] = _matrix_to_action_pose(inverse_pelvis @ targets[side])
+                        high_level_action[0:2] = hand_close
+                    if hug_start_step is not None:
+                        hug_elapsed = step - hug_start_step
+                        hug_fraction = _smooth((hug_elapsed + 1) / int(args_cli.hug_move_steps))
+                        hug_goal_pelvis = np.eye(4)
+                        hug_goal_pelvis[:3, :3] = Rotation.from_euler("y", -math.radians(float(args_cli.hug_tilt_deg))).as_matrix()
+                        hug_goal_pelvis[:3, 3] = (float(args_cli.hug_pos[0]), 0.0, float(args_cli.hug_pos[1]))
+                        desired_box = _interp_pose(hug_anchor_box, pelvis_pose @ hug_goal_pelvis, hug_fraction)
+                        inverse_pelvis = np.linalg.inv(pelvis_pose)
+                        for side, position_slice, quaternion_slice in (
+                            ("left", slice(2, 5), slice(5, 9)),
+                            ("right", slice(9, 12), slice(12, 16)),
+                        ):
+                            high_level_action[position_slice], high_level_action[quaternion_slice] = _matrix_to_action_pose(
+                                inverse_pelvis @ desired_box @ hug_wrist_in_box[side]
+                            )
+                        high_level_action[16:19] = 0.0
+                    if support_start_step is not None:
+                        support_elapsed = step - support_start_step
+                        phase_steps = int(args_cli.support_phase_steps)
+                        if support_elapsed < phase_steps:
+                            release_fraction = 0.0
+                        elif support_elapsed < 2 * phase_steps:
+                            release_fraction = (support_elapsed - phase_steps + 1) / phase_steps
+                        else:
+                            release_fraction = max(
+                                0.0, 1.0 - (support_elapsed - 2 * phase_steps + 1) / phase_steps
+                            )
+                        # Pelvis-frame lateral release (left wrist +y, right wrist -y)
+                        # and an optional downward slide of both wrists.
+                        release = float(args_cli.support_release_m) * release_fraction
+                        drop = float(args_cli.support_drop_m) * min(
+                            1.0, max(0.0, (support_elapsed - phase_steps + 1) / phase_steps)
+                        )
+                        if args_cli.support_wrist_pitch_rad != 0.0:
+                            pitch = float(args_cli.support_wrist_pitch_rad) * min(
+                                1.0, (support_elapsed + 1) / phase_steps
+                            )
+                            pitch_rotation = Rotation.from_euler("y", pitch)
+                            for quat_slice in (slice(5, 9), slice(12, 16)):
+                                high_level_action[quat_slice] = (
+                                    pitch_rotation * Rotation.from_quat(high_level_action[quat_slice])
+                                ).as_quat().astype(np.float32)
+                        high_level_action[3] += release
+                        high_level_action[10] -= release
+                        high_level_action[4] -= drop
+                        high_level_action[11] -= drop
                     pre_step_observation = _phase_student_observation(
                         env, observation, grasp_lift=grasp_lift_scope
                     )
@@ -1150,6 +2264,57 @@ def main() -> None:
                     raw_action, absolute_target = _action_order_target(
                         env, target_names, target_values
                     )
+                    if hook_start_step is not None:
+                        hook_elapsed = step - hook_start_step - int(args_cli.hook_stepin_steps)
+                        hook_p = int(args_cli.hook_phase_steps)
+                        curl_fraction = 0.0 if args_cli.hook_hug else _smooth((hook_elapsed - 6 * hook_p + 1) / hook_p)
+                        if curl_fraction > 0.0:
+                            raw_action, absolute_target = _hook_finger_targets(
+                                env, absolute_target, curl_fraction
+                            )
+                    if flat_palm_fraction > 0.0:
+                        action_term = env.action_manager.get_term("JointPositionAction")
+                        action_names = list(action_term._joint_names)
+                        hand_goal = dict(FLAT_PALM_HAND)
+                        if args_cli.flat_palm_press_curl is not None and source_index >= trajectory.close_index:
+                            press = _smooth((source_index - trajectory.close_index + 1) / int(args_cli.flat_palm_close_steps))
+                            proximal, distal = (float(v) for v in args_cli.flat_palm_press_curl)
+                            for side, sign in (("left", -1.0), ("right", 1.0)):
+                                for finger in ("index", "middle"):
+                                    for joint, value in (("0", proximal), ("1", distal)):
+                                        name = f"{side}_hand_{finger}_{joint}_joint"
+                                        hand_goal[name] = (1.0 - press) * hand_goal[name] + press * sign * value
+                        for name, goal in hand_goal.items():
+                            index = action_names.index(name)
+                            absolute_target[0, index] = (1.0 - flat_palm_fraction) * absolute_target[0, index] + flat_palm_fraction * goal
+                        raw_action = (absolute_target - action_term._offset) / action_term._scale
+                    if pl.get("finger_frac", 0.0) > 0.0:
+                        action_term = env.action_manager.get_term("JointPositionAction")
+                        action_names = list(action_term._joint_names)
+                        for name, goal in pl["finger_goal"].items():
+                            index = action_names.index(name)
+                            absolute_target[0, index] = (1.0 - pl["finger_frac"]) * absolute_target[0, index] + pl["finger_frac"] * goal
+                        raw_action = (absolute_target - action_term._offset) / action_term._scale
+                    elif args_cli.pull_finger_curl is not None and pl.get("curl", 0.0) > 0.0:
+                        action_term = env.action_manager.get_term("JointPositionAction")
+                        action_names = list(action_term._joint_names)
+                        proximal, distal = (float(v) for v in args_cli.pull_finger_curl)
+                        for side, sign in (("left", -1.0), ("right", 1.0)):
+                            for finger in ("index", "middle"):
+                                for joint, goal in (("0", proximal), ("1", distal)):
+                                    index = action_names.index(f"{side}_hand_{finger}_{joint}_joint")
+                                    absolute_target[0, index] = (1.0 - pl["curl"]) * absolute_target[0, index] + pl["curl"] * sign * goal
+                        raw_action = (absolute_target - action_term._offset) / action_term._scale
+                    if support_start_step is not None:
+                        support_elapsed = step - support_start_step
+                        phase_steps = int(args_cli.support_phase_steps)
+                        curl_start = phase_steps if args_cli.support_wrist_pitch_rad != 0.0 else 0
+                        curl_fraction = min(
+                            1.0, max(0.0, (support_elapsed - curl_start + 1) / phase_steps)
+                        )
+                        raw_action, absolute_target = _support_regrasp_targets(
+                            env, absolute_target, curl_fraction
+                        )
 
                     observation, _, _, _, _ = env.step(raw_action)
                     if video_writer is not None:
@@ -1194,12 +2359,57 @@ def main() -> None:
                             ).amin()
                         ),
                     )
+                    if hug_start_step is not None and args_cli.hook_camera_dir is not None and (step - hug_start_step) in (0, int(args_cli.hug_move_steps), int(args_cli.hug_move_steps) + int(args_cli.hug_hold_steps) - 2):
+                        import imageio
+
+                        _rgb = env.scene["front_camera"].data.output["rgb"][0].detach().cpu().numpy()
+                        _dir = Path(args_cli.hook_camera_dir).expanduser()
+                        _dir.mkdir(parents=True, exist_ok=True)
+                        imageio.imwrite(_dir / f"d435_hug_k{step - hug_start_step:04d}.png", _rgb[..., :3].astype(np.uint8))
+                    if hook_start_step is not None and args_cli.hook_camera_dir is not None:
+                        _k = step - hook_start_step - int(args_cli.hook_stepin_steps)
+                        _p = int(args_cli.hook_phase_steps)
+                        if _k in (6 * _p - 1, 8 * _p - 1, 11 * _p - 1, 11 * _p + int(args_cli.hook_hold_steps) - 2):
+                            import imageio
+
+                            _rgb = env.scene["front_camera"].data.output["rgb"][0].detach().cpu().numpy()
+                            _dir = Path(args_cli.hook_camera_dir).expanduser()
+                            _dir.mkdir(parents=True, exist_ok=True)
+                            imageio.imwrite(_dir / f"d435_k{_k:04d}.png", _rgb[..., :3].astype(np.uint8))
+                    if hook_start_step is not None and (step - hook_start_step) % hook_log_every == 0:
+                        _pelvis_now = _torch_pose_wxyz(robot.data.body_link_pos_w[0, pelvis_id], robot.data.body_link_quat_w[0, pelvis_id])
+                        _box_dist = float((np.linalg.inv(_pelvis_now) @ _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0]))[0, 3])
+                        box_pose_now = _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                        half = 0.5 * float(args_cli.box_size)
+                        near_bottom = (box_pose_now @ np.array([-half, 0.0, -half, 1.0]))[2]
+                        far_bottom = (box_pose_now @ np.array([half, 0.0, -half, 1.0]))[2]
+                        pitch = math.degrees(Rotation.from_matrix(box_pose_now[:3, :3]).as_euler("xyz")[1])
+                        print(
+                            f"[hook] k={step - hook_start_step:4d} pitch={pitch:+6.1f}deg "
+                            f"near_bottom_z={near_bottom:.3f} far_bottom_z={far_bottom:.3f} "
+                            f"box_xy=({float(box.data.root_link_pos_w[0,0]):.3f},{float(box.data.root_link_pos_w[0,1]):.3f}) "
+                            f"contacts L{left_count} R{right_count} box_ahead_of_pelvis={_box_dist:.3f} "
+                            f"box_z_rel_pelvis={float((np.linalg.inv(_pelvis_now) @ box_pose_now)[2, 3]):+.3f}",
+                            flush=True,
+                        )
                     lifted = box_height >= box_initial_height + 0.12
                     bilateral_contact = left_count > 0 and right_count > 0
                     lift_history.append(lifted)
                     left_contact_history.append(left_count > 0)
                     right_contact_history.append(right_count > 0)
-                    if lifted and bilateral_contact:
+                    if (
+                        args_cli.support_regrasp
+                        and support_start_step is None
+                        and source_index >= trajectory.freeze_index
+                        and lifted
+                        and bilateral_contact
+                    ):
+                        support_start_step = step + 1
+                    support_ready = not args_cli.support_regrasp or (
+                        support_start_step is not None
+                        and step - support_start_step + 1 >= support_total_steps
+                    )
+                    if lifted and bilateral_contact and support_ready:
                         stable_hold_steps += 1
                         grasp_lift_achieved = True
                     else:
@@ -1218,6 +2428,73 @@ def main() -> None:
                         and not bad_orientation
                         and not dropped
                     )
+                    if args_cli.regrasp_hug and nominal_success and rg_start is None:
+                        rg_start = step + 1
+                        rg["anchor_box"] = _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                        rg["grip"] = {}
+                        for side, position_slice, quaternion_slice in (
+                            ("left", slice(2, 5), slice(5, 9)),
+                            ("right", slice(9, 12), slice(12, 16)),
+                        ):
+                            command_pelvis = np.eye(4)
+                            command_pelvis[:3, 3] = high_level_action[position_slice]
+                            command_pelvis[:3, :3] = Rotation.from_quat(high_level_action[quaternion_slice]).as_matrix()
+                            rg["grip"][side] = np.linalg.inv(rg["anchor_box"]) @ (pelvis_pose @ command_pelvis)
+                        half = 0.5 * float(args_cli.box_size)
+                        table_near_edge_x = float(table_xy[0]) - 0.20
+                        rg["place_box"] = _flat_box_pose(
+                            rg["anchor_box"],
+                            (table_near_edge_x + half + float(args_cli.regrasp_place_margin_m), float(rg["anchor_box"][1, 3]), 0.74 + half + float(args_cli.regrasp_place_dz_m)),
+                        )
+                        print(f"[regrasp] start at step {step}", flush=True)
+                    if rg_start is not None:
+                        _phase, _k, _len = _regrasp_phase(step - rg_start)
+                        _pel = _torch_pose_wxyz(robot.data.body_link_pos_w[0, pelvis_id], robot.data.body_link_quat_w[0, pelvis_id])
+                        _bx = np.linalg.inv(_pel) @ _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                        if (step - rg_start) % 25 == 0:
+                            print(
+                                f"[regrasp] t={step - rg_start:4d} {_phase:8s} box_in_pelvis=({_bx[0,3]:+.3f},{_bx[1,3]:+.3f},{_bx[2,3]:+.3f}) "
+                                f"pitch={math.degrees(Rotation.from_matrix(_bx[:3,:3]).as_euler('xyz')[1]):+.1f} box_world_z={box_height:.3f} "
+                                f"contacts L{left_count} R{right_count} pelvis_x={float(robot.data.root_link_pos_w[0,0]):.3f}",
+                                flush=True,
+                            )
+                        if args_cli.hook_camera_dir is not None and _k == _len - 1 and _phase in ("retract", "squeeze", "hug", "hold"):
+                            import imageio
+
+                            _rgb = env.scene["front_camera"].data.output["rgb"][0].detach().cpu().numpy()
+                            _dir = Path(args_cli.hook_camera_dir).expanduser()
+                            _dir.mkdir(parents=True, exist_ok=True)
+                            imageio.imwrite(_dir / f"d435_regrasp_{_phase}.png", _rgb[..., :3].astype(np.uint8))
+                        nominal_success = False
+                    if args_cli.hug_after_hold and nominal_success and hug_start_step is None:
+                        hug_start_step = step + 1
+                        hug_anchor_box = _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                        # Keep the *commanded* (compressed) wrist targets relative to the Box;
+                        # the realized wrist poses would drop the squeeze force.
+                        for side, position_slice, quaternion_slice in (
+                            ("left", slice(2, 5), slice(5, 9)),
+                            ("right", slice(9, 12), slice(12, 16)),
+                        ):
+                            command_pelvis = np.eye(4)
+                            command_pelvis[:3, 3] = high_level_action[position_slice]
+                            command_pelvis[:3, :3] = Rotation.from_quat(high_level_action[quaternion_slice]).as_matrix()
+                            hug_wrist_in_box[side] = np.linalg.inv(hug_anchor_box) @ (pelvis_pose @ command_pelvis)
+                        print(f"[hug] start at step {step}", flush=True)
+                    if args_cli.hug_after_hold:
+                        hug_done = hug_start_step is not None and step - hug_start_step + 1 >= int(args_cli.hug_move_steps) + int(args_cli.hug_hold_steps)
+                        _pel = _torch_pose_wxyz(robot.data.body_link_pos_w[0, pelvis_id], robot.data.body_link_quat_w[0, pelvis_id])
+                        _bx = np.linalg.inv(_pel) @ _torch_pose_wxyz(box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
+                        hug_height_ok = abs(float(_bx[2, 3]) - float(args_cli.hug_pos[1])) < 0.04
+                        if hug_start_step is not None and (step - hug_start_step) % 25 == 0:
+                            print(
+                                f"[hug] k={step - hug_start_step:4d} box_in_pelvis=({_bx[0,3]:+.3f},{_bx[1,3]:+.3f},{_bx[2,3]:+.3f}) "
+                                f"pitch={math.degrees(Rotation.from_matrix(_bx[:3,:3]).as_euler('xyz')[1]):+.1f} "
+                                f"lift={lift_height:.3f} contacts L{left_count} R{right_count} pelvis_x={float(robot.data.root_link_pos_w[0,0]):.3f}",
+                                flush=True,
+                            )
+                        nominal_success = bool(
+                            hug_done and hug_height_ok and bilateral_contact and not bad_orientation and not dropped
+                        )
                     if (
                         args_cli.freeze_realized_hold_wrists
                         and realized_hold_wrist_world is None
@@ -1295,7 +2572,7 @@ def main() -> None:
                     if navigating and not navigation_complete and navigation_steps >= navigation_budget:
                         termination_reason = "navigation_timeout"
                         break
-                    if not navigating and step - navigation_steps + 1 >= trajectory.freeze_index + required_hold_steps + grace_steps:
+                    if not navigating and step - navigation_steps + 1 >= trajectory.freeze_index + required_hold_steps + grace_steps + support_extra_steps:
                         break
 
                 strict_filter_pass = episode_passes_bimanual_lift_hold(
@@ -1389,6 +2666,9 @@ def main() -> None:
             else:
                 snapshot_store.abort()
     except BaseException:
+        import traceback
+
+        traceback.print_exc()
         if recorder is not None:
             recorder.abort()
         if snapshot_store is not None:

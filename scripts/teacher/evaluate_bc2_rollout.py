@@ -56,6 +56,19 @@ parser.add_argument(
 )
 parser.add_argument("--wrist_z_offset_m", type=float, default=0.0)
 parser.add_argument("--hold_lift_margin_m", type=float, default=0.05)
+parser.add_argument(
+    "--flat_palm_grip",
+    action="store_true",
+    help="Reproduce the L-shaped flat-palm teacher approach (step-in, wrist blend, hand shape) up to the BC-2 hand-off",
+)
+parser.add_argument("--flat_palm_blend_steps", type=int, default=100)
+parser.add_argument("--flat_palm_close_steps", type=int, default=40)
+parser.add_argument("--flat_palm_out_m", type=float, default=0.04)
+parser.add_argument("--flat_palm_squeeze_m", type=float, default=0.005)
+parser.add_argument("--flat_palm_dx", type=float, default=0.02)
+parser.add_argument("--flat_palm_stand_dist", type=float, default=0.42)
+parser.add_argument("--flat_palm_feedback", type=float, default=0.05)
+parser.add_argument("--flat_palm_press_curl", type=float, nargs=2, default=(0.35, 0.5))
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -98,6 +111,7 @@ from unitree_rl_lab.utils.teacher.phase_bc import (
     load_bc_policy,
     validate_runtime_action_contract,
 )
+from unitree_rl_lab.utils.teacher.flat_palm_grip import FlatPalmApproach, FlatPalmConfig
 from unitree_rl_lab.utils.teacher.phase_teachers import pose_matrix_wxyz
 from unitree_rl_lab.utils.teacher.physical_snapshot_runtime import (
     capture_physical_snapshot,
@@ -238,6 +252,22 @@ def main() -> None:
             )
             initial_box_pose_np = initial_box_pose.detach().cpu().numpy()
             retargeted = trajectory.retarget(pose_matrix_wxyz(initial_box_pose_np))
+            flat_palm = (
+                FlatPalmApproach(
+                    FlatPalmConfig(
+                        blend_steps=args_cli.flat_palm_blend_steps,
+                        close_steps=args_cli.flat_palm_close_steps,
+                        out_m=args_cli.flat_palm_out_m,
+                        squeeze_m=args_cli.flat_palm_squeeze_m,
+                        dx_m=args_cli.flat_palm_dx,
+                        stand_dist_m=args_cli.flat_palm_stand_dist,
+                        feedback_gain=args_cli.flat_palm_feedback,
+                        press_curl=tuple(args_cli.flat_palm_press_curl),
+                    )
+                )
+                if args_cli.flat_palm_grip
+                else None
+            )
             initial_height = float(box.data.root_link_pos_w[0, 2])
             hold_steps = 0
             max_hold = 0
@@ -256,12 +286,37 @@ def main() -> None:
                         body_pose_wxyz(robot, pelvis).detach().cpu().numpy(),
                         retargeted,
                     )
+                    hand_fraction, flat_command = 0.0, None
+                    if flat_palm is not None:
+                        wrists = {
+                            side: pose_matrix_wxyz(body_pose_wxyz(robot, body_id(robot, f"{side}_wrist_yaw_link")).detach().cpu().numpy())
+                            for side in ("left", "right")
+                        }
+                        hand_fraction, flat_command = flat_palm.override(
+                            step,
+                            trajectory,
+                            retargeted,
+                            pose_matrix_wxyz(initial_box_pose_np),
+                            pose_matrix_wxyz(body_pose_wxyz(robot, pelvis).detach().cpu().numpy()),
+                            pose_matrix_wxyz(torch.cat((box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])).detach().cpu().numpy()),
+                            wrists,
+                            high_level,
+                        )
                     camera_command = env.command_manager.get_term(
                         "base_velocity"
                     ).command[0]
                     high_level[16:19] = camera_command.detach().cpu().numpy()
+                    if flat_command is not None:
+                        high_level[16:19] = flat_command
                     names, values = teacher_bridge.step(bridge_request(env, high_level))
-                    raw_action = action_order_target(env, names, values)[0]
+                    raw_action, absolute_target = action_order_target(env, names, values)
+                    if hand_fraction > 0.0:
+                        term = env.action_manager.get_term("JointPositionAction")
+                        action_names = list(term._joint_names)
+                        for name, goal in flat_palm.hand_targets(step, trajectory.close_index).items():
+                            index = action_names.index(name)
+                            absolute_target[0, index] = (1.0 - hand_fraction) * absolute_target[0, index] + hand_fraction * goal
+                        raw_action = (absolute_target - term._offset) / term._scale
                 else:
                     obs_np = replace_velocity_command(
                         obs_np, np.zeros((1, 3), dtype=np.float32)
@@ -365,6 +420,7 @@ def main() -> None:
         "teacher_wrist_orientation_source": args_cli.wrist_orientation_source,
         "teacher_wrist_z_offset_m": args_cli.wrist_z_offset_m,
         "teacher_hold_lift_margin_m": args_cli.hold_lift_margin_m,
+        "teacher_flat_palm_grip": bool(args_cli.flat_palm_grip),
     }
     evaluator_config_sha256 = hashlib.sha256(
         json.dumps(

@@ -185,6 +185,8 @@ parser.add_argument(
     help="Optional MP4 target prefix; requires --enable_cameras",
 )
 parser.add_argument("--video_length_steps", type=int, default=750)
+parser.add_argument("--carry_squeeze_m", type=float, default=0.0, help="Extra inward wrist offset applied to the locked Carry arm targets (via an IK joint delta)")
+parser.add_argument("--carry_raise_m", type=float, default=0.0, help="Extra upward wrist offset applied to the locked Carry arm targets (via an IK joint delta)")
 parser.add_argument(
     "--video_follow_robot",
     action="store_true",
@@ -521,6 +523,7 @@ def _carry_controller_handoff(
     left_tips: list[int],
     right_tips: list[int],
     bin_pose: torch.Tensor,
+    final_reference_raw_action: torch.Tensor | None = None,
 ) -> tuple[bool, str, int, int, float]:
     """Synchronize Arena WBC without exposing the loaded grasp to a command jump."""
 
@@ -552,8 +555,13 @@ def _carry_controller_handoff(
         blended = reference_raw_action + fraction * (
             proposed_raw - reference_raw_action
         )
+        lock_reference = reference_raw_action
+        if final_reference_raw_action is not None:
+            lock_reference = reference_raw_action + fraction * (
+                final_reference_raw_action - reference_raw_action
+            )
         applied_raw, absolute_target = _preserve_realized_grasp_targets(
-            env, blended, reference_raw_action
+            env, blended, lock_reference
         )
         env.step(applied_raw)
         _synchronize_task_phase(env, 1)
@@ -848,6 +856,33 @@ def _run_trial(
             grasp,
             minimum_box_height_w=float(box.data.root_link_pos_w[0, 2]),
         )
+        final_reference = None
+        if args_cli.carry_squeeze_m != 0.0 or args_cli.carry_raise_m != 0.0:
+            base_high_level = teacher.action(
+                current_box_pose_wxyz=_pose7(box).detach().cpu().numpy(),
+                current_pelvis_pose_wxyz=body_pose_wxyz(robot, pelvis).detach().cpu().numpy(),
+                camera_navigation_velocity=np.zeros(3, dtype=np.float32),
+            )
+            adjusted_high_level = base_high_level.copy()
+            adjusted_high_level[3] -= args_cli.carry_squeeze_m
+            adjusted_high_level[10] += args_cli.carry_squeeze_m
+            adjusted_high_level[4] += args_cli.carry_raise_m
+            adjusted_high_level[11] += args_cli.carry_raise_m
+            solutions = []
+            for high_level_candidate in (base_high_level, adjusted_high_level):
+                ik_request = bridge_request(env, high_level_candidate)
+                ik_request["ik_only"] = True
+                for _ in range(30):
+                    ik_names, ik_values = bridge.step(ik_request)
+                solutions.append(action_order_target(env, ik_names, ik_values)[0])
+            term = env.action_manager.get_term("JointPositionAction")
+            arm_indices = [
+                index
+                for index in carry_grasp_lock_indices(tuple(term._joint_names))
+                if "_hand_" not in term._joint_names[index]
+            ]
+            final_reference = reference_raw_action.clone()
+            final_reference[:, arm_indices] += (solutions[1] - solutions[0])[:, arm_indices]
         handoff_ok, handoff_reason, left_count, right_count, lift_height = (
             _carry_controller_handoff(
                 env,
@@ -864,8 +899,11 @@ def _run_trial(
                 left_tips=left_tips,
                 right_tips=right_tips,
                 bin_pose=bin_pose,
+                final_reference_raw_action=final_reference,
             )
         )
+        if final_reference is not None:
+            reference_raw_action = final_reference
         if not handoff_ok:
             return {
                 "success": False,
