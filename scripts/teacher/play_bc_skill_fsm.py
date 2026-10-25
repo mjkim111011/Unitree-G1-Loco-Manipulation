@@ -393,6 +393,41 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--approach_hand_state_decoding",
+    choices=("none", "binary"),
+    default="none",
+    help=(
+        "binary: map the 23-D APPROACH hand-state outputs to the Arena {0, 1} "
+        "contract (>= 0.5 closes). With none, any non-zero regression output "
+        "closes the Dex3 hand because Arena tests hand_state == 0."
+    ),
+)
+parser.add_argument(
+    "--narrow_camera_profile",
+    choices=("certified_55", "collector_69"),
+    default="certified_55",
+    help=(
+        "Narrow-workspace camera contract: certified_55 keeps the historical "
+        "55.2 deg overrides; collector_69 keeps the environment defaults used "
+        "by collect_nominal_box_teacher.py (69.4 deg)."
+    ),
+)
+parser.add_argument(
+    "--pre_navigate",
+    action="store_true",
+    help=(
+        "Approach research: start each episode from a random pose behind the canonical BC-1 start "
+        "and drive there with the ground-truth scripted navigator (Homie [vx, vy, wz], fixed nominal "
+        "wrist targets, open hands), then settle, before the unchanged APPROACH phase"
+    ),
+)
+parser.add_argument("--pre_navigate_start_range", type=float, nargs=6, default=(-0.8, -0.4, -0.25, 0.25, -0.4, 0.4),
+                    metavar=("DX_LO", "DX_HI", "DY_LO", "DY_HI", "DYAW_LO", "DYAW_HI"))
+parser.add_argument("--pre_navigate_max_steps", type=int, default=750)
+parser.add_argument("--pre_navigate_tolerance", type=float, nargs=2, default=(0.03, 0.03), metavar=("POS_M", "YAW_RAD"))
+parser.add_argument("--pre_navigate_target_jitter", type=float, nargs=3, default=(0.0, 0.0, 0.0), metavar=("DX", "DY", "DYAW"))
+parser.add_argument("--pre_navigate_settle_steps", type=int, default=25)
+parser.add_argument(
     "--approach_task_target_passthrough",
     action=argparse.BooleanOptionalAction,
     default=False,
@@ -729,7 +764,7 @@ def _configure_env():
     cfg.commands.base_velocity.yaw_tolerance = float(
         args_cli.carry_staging_yaw_tolerance_rad
     )
-    if not args_cli.randomize_work_area:
+    if not args_cli.randomize_work_area and args_cli.narrow_camera_profile == "certified_55":
         # Preserve the camera observation contract used to train and certify
         # the narrow-workspace Students.  The wider RealSense-like lens is a
         # separate 5 m workspace curriculum and changes QR-visible histories.
@@ -764,6 +799,9 @@ def _configure_env():
         "y": (0.0, 0.0),
         "yaw": (0.0, 0.0),
     }
+    if args_cli.pre_navigate:
+        x_lo, x_hi, y_lo, y_hi, yaw_lo, yaw_hi = args_cli.pre_navigate_start_range
+        cfg.events.reset_base.params["pose_range"] = {"x": (x_lo, x_hi), "y": (y_lo, y_hi), "yaw": (yaw_lo, yaw_hi)}
     cfg.events.reset_pick_place_scene.params["box_base_size"] = (BOX_SIZE_M,) * 3
     if args_cli.randomize_work_area:
         centre_extent = 0.5 * args_cli.work_area_size_m - 0.45
@@ -792,6 +830,8 @@ def _configure_env():
     cfg.terminations.success = None
     cfg.rewards.bad_orientation_penalty = None
     cfg.episode_length_s = args_cli.episode_seconds + 1.0
+    if args_cli.pre_navigate:
+        cfg.episode_length_s += 0.02 * (args_cli.pre_navigate_max_steps + args_cli.pre_navigate_settle_steps)
     if args_cli.video_output is not None:
         cfg.viewer.eye = (2.9, 2.5, 2.1)
         cfg.viewer.lookat = (0.65, -0.25, 0.82)
@@ -1349,6 +1389,65 @@ def _handoff_geometry(
     }
 
 
+def _pre_navigate(env, bridge, episode: int) -> dict:
+    """Approach research: GT scripted navigation to the canonical BC-1 start, then a Homie stand settle."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "approach"))
+    from scripted_nav import NavGains, bc1_start_pose, nav_command, pose_error_body, wrap_to_pi
+
+    robot = env.scene["robot"]
+    pelvis = body_id(robot, "pelvis")
+    pelvis_inv = math_utils.quat_inv(robot.data.body_link_quat_w[0, pelvis].unsqueeze(0))
+    wrists = []
+    for name in ("left_wrist_yaw_link", "right_wrist_yaw_link"):
+        index = body_id(robot, name)
+        offset = (robot.data.body_link_pos_w[0, index] - robot.data.body_link_pos_w[0, pelvis]).unsqueeze(0)
+        rel = math_utils.quat_apply(pelvis_inv, offset)[0].detach().cpu().numpy()
+        quat = math_utils.quat_mul(pelvis_inv, robot.data.body_link_quat_w[0, index].unsqueeze(0))[0].detach().cpu().numpy()
+        wrists.extend([*rel, *quat[[1, 2, 3, 0]]])
+    target = bc1_start_pose(env.scene["box"].data.root_link_pos_w[0, :2].detach().cpu().numpy())
+    jitter = np.random.default_rng([args_cli.seed, episode, 7]).uniform(-1.0, 1.0, 3) * np.asarray(args_cli.pre_navigate_target_jitter)
+    target = (target[0] + float(jitter[0]), target[1] + float(jitter[1]), target[2] + float(jitter[2]))
+    gains = NavGains(min_command_norm=0.10)
+
+    def step(command) -> None:
+        env.task_phase[0] = _task_phase(SkillPhase.APPROACH)
+        env.command_manager.compute(0.0)
+        action = np.zeros(23, dtype=np.float32)
+        action[2:16] = wrists
+        action[16:19] = command
+        action[19] = 0.75
+        names, values = bridge.step(bridge_request(env, action))
+        env.step(action_order_target(env, names, values)[0])
+
+    arrived, nav_steps = False, 0
+    for nav_steps in range(args_cli.pre_navigate_max_steps):
+        xy = robot.data.root_link_pos_w[0, :2].detach().cpu().numpy()
+        yaw = _yaw_from_quat_wxyz(robot.data.root_link_quat_w[0])
+        ex, ey, eyaw = pose_error_body(xy, yaw, target[:2], target[2])
+        if math.hypot(ex, ey) <= args_cli.pre_navigate_tolerance[0] and abs(eyaw) <= args_cli.pre_navigate_tolerance[1]:
+            arrived = True
+            break
+        step(nav_command(xy, yaw, target[:2], target[2], gains))
+        if _bad_orientation(env):
+            break
+    for _ in range(args_cli.pre_navigate_settle_steps):
+        step(np.zeros(3, dtype=np.float32))
+    canonical = bc1_start_pose(env.scene["box"].data.root_link_pos_w[0, :2].detach().cpu().numpy())
+    xy = robot.data.root_link_pos_w[0, :2].detach().cpu().numpy()
+    yaw = _yaw_from_quat_wxyz(robot.data.root_link_quat_w[0])
+    return {
+        "arrived": arrived,
+        "nav_steps": int(nav_steps),
+        "target_jitter": [round(float(v), 4) for v in jitter],
+        "handoff_offset_canonical": [round(float(xy[0] - canonical[0]), 4), round(float(xy[1] - canonical[1]), 4),
+                                     round(float(wrap_to_pi(yaw - canonical[2])), 4)],
+        "handoff_speed_mps": round(float(torch.linalg.vector_norm(robot.data.root_link_lin_vel_b[0, :2])), 4),
+        "fell": bool(_bad_orientation(env)),
+    }
+
+
 def main() -> None:
     checkpoints = {
         SkillPhase.APPROACH: args_cli.approach_checkpoint,
@@ -1538,6 +1637,12 @@ def main() -> None:
             if bridge is not None:
                 bridge.reset()
                 print(f"[FSM] episode {episode} WBC history reset", flush=True)
+            pre_navigation = None
+            if args_cli.pre_navigate:
+                if bridge is None:
+                    raise RuntimeError("--pre_navigate needs the Arena WBC bridge")
+                pre_navigation = _pre_navigate(env, bridge, episode)
+                print(f"[FSM] episode {episode} pre-navigation {json.dumps(pre_navigation)}", flush=True)
             initial_box_height = float(env.scene["box"].data.root_link_pos_w[0, 2])
             initial_box_xy = (
                 env.scene["box"].data.root_link_pos_w[0, :2]
@@ -1848,6 +1953,10 @@ def main() -> None:
                     current_phase == SkillPhase.APPROACH
                     and current_action_key == "teacher_high_level_action"
                 ):
+                    if args_cli.approach_hand_state_decoding == "binary":
+                        policy_action[:, :2] = (policy_action[:, :2] >= 0.5).astype(
+                            np.float32
+                        )
                     if approach_ready_reference is not None:
                         policy_action = approach_ready_reference.copy()
                         policy_action[:, 16:19] = 0.0
@@ -2589,6 +2698,7 @@ def main() -> None:
             bad_orientation_count += int(reason == "bad_orientation")
             result = {
                 "episode": episode,
+                "pre_navigation": pre_navigation,
                 "final_phase": final_phase.name.lower(),
                 "failed": failed,
                 "reason": reason,
@@ -2735,6 +2845,16 @@ def main() -> None:
         ),
         "approach_action_alpha": args_cli.approach_action_alpha,
         "approach_search_torso_pitch_rad": args_cli.approach_search_torso_pitch_rad,
+        "approach_hand_state_decoding": args_cli.approach_hand_state_decoding,
+        "narrow_camera_profile": args_cli.narrow_camera_profile,
+        "pre_navigate": {
+            "enabled": args_cli.pre_navigate,
+            "start_range": list(args_cli.pre_navigate_start_range),
+            "max_steps": args_cli.pre_navigate_max_steps,
+            "tolerance": list(args_cli.pre_navigate_tolerance),
+            "target_jitter": list(args_cli.pre_navigate_target_jitter),
+            "settle_steps": args_cli.pre_navigate_settle_steps,
+        },
         "approach_task_target_passthrough": (
             args_cli.approach_task_target_passthrough
         ),
