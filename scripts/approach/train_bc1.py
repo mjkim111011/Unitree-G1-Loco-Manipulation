@@ -12,7 +12,7 @@ only differences are:
   environment's own sensor-noise half-ranges (see ``observation_floor``).
 
 This is a re-training on the locally regenerated corpus, not a reproduction of
-the senior's r05 checkpoint (whose DAgger data is unavailable).
+the lab's open-hand DAgger r05 checkpoint (whose DAgger data is unavailable).
 """
 
 from __future__ import annotations

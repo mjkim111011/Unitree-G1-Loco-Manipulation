@@ -8,7 +8,7 @@ the table is axis-aligned and never rotated, so theta = 0 for every environment.
 
 Handoff errors are expressed relative to the canonical start in the approach frame:
     e_x  > 0 = closer to the Box,  e_y = left,  e_yaw = robot yaw - theta.
-The measured BC-1 v2 region (outputs/approach_p1/reports/BC1_report_2026-10-19.md, n = 40) is
+The measured BC-1 v2 region (40 post-navigation handoffs, 2026-10-19) is
     e_x in [-0.08, +0.015] m, |e_y| <= 0.04 m, |e_yaw| <= 0.08 rad, speed <= 0.1 m/s.
 The navigation target point is the centre of that window: e_x = -0.03 m, e_y = 0, e_yaw = 0.
 

@@ -246,7 +246,7 @@ def cmd_obs_stats(args) -> None:
         "episode_counts": {k: v.num_episodes for k, v in arrays.items()},
     }
 
-    # 1. Does this reproduce the user's bc1_approach_23d.pt training split?
+    # 1. Does this reproduce the training split of the lab's bc1_approach_23d.pt?
     metrics_path = Path(args.metrics_json)
     if metrics_path.is_file():
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))

@@ -18,7 +18,7 @@ LOGS=${LOGS:-outputs/approach_p8/logs/collect}
 mkdir -p "$ROOT" "$LOGS"
 EPISODES=${EPISODES:-40}
 MARGIN=${MARGIN:-0.04}
-MARGIN_LATE=${MARGIN_LATE:-0.04}   # pre-grasp margin (last 30 steps before the close onset); see the phase-8 report
+MARGIN_LATE=${MARGIN_LATE:-0.04}   # pre-grasp margin (last 30 steps before the close onset); v3.1 data: 0.07 (run_p8_v31_pipeline.sh)
 V7_JIT=outputs/approach_p5/eval/v7_nav_policy.pt
 BASE=(--mode teacher_collect --teacher_path safe --safe_margin "$MARGIN" --safe_margin_late "$MARGIN_LATE" --camera_profile collector --episode_seconds 6
       --pre_upper_body nominal --no_step_log --headless --device cuda:0 --safety_metrics

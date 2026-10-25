@@ -6,9 +6,10 @@
 
 > **실제 로봇 배포 불가 (현재 상태)**
 > - PPO navigation은 시뮬레이터의 GT(ground truth) 값을 관측합니다: 목표(BC-1 시작 자세)의 위치·방향·거리, base 선속도.
-> - 테이블 안전 정지는 GT 테이블 위치를 쓰고, scripted navigator는 GT 로봇 자세를 씁니다.
-> - 따라서 인식(QR·카메라) 기반 목표 추정과 상태 추정으로 바꾸기 전에는 **실제 로봇에 바로 배포할 수 없습니다.**
-> - BC-1 / BC-2 정책 자체는 lab의 Student 관측 규약(`unitree_box_qr_proprio_v1`, 517-D)만 쓰고, privileged 입력은 없습니다.
+> - 테이블 안전 정지와 BC-1 → BC-2 gate는 GT 테이블·박스 위치를 쓰고, scripted navigator는 GT 로봇 자세를 씁니다.
+> - BC-1 / BC-2는 lab의 Student 관측 규약(`unitree_box_qr_proprio_v1`, 517-D)만 입력으로 받습니다. lab 규약상 privileged 데이터(정답 world pose, 접촉, lift 등)는 입력에 없습니다.
+> - 다만 이 규약의 카메라 항목(Box·Bin QR 위치와 보임 여부, Table 위치)은 시뮬레이터가 GT 위치를 카메라 모델로 변환해 만든 값입니다. 실제 검출기의 잡음이나 오검출은 반영되지 않았습니다(1.1절).
+> - 따라서 인식과 상태 추정으로 바꾸고 다시 검증하기 전에는 **실제 로봇에 바로 배포할 수 없습니다.**
 > - 모든 결과는 시뮬레이션 결과입니다.
 
 ## 1. 구성
@@ -26,6 +27,24 @@ PPO navigation (Homie V2 [vx, vy, wz] + stop)  ──handoff 창──▶  BC-1 
 | BC-2 v3.1 | BC-1 v3.1의 gate 상태에서 Teacher가 이어 수행한 무접촉 파지·리프트 시연 159개로 학습(handoff 시점부터 label) |
 | Handoff gate | FSM의 Approach→Grasp 조건과 같은 4개 기하 조건: 손끝 거리 0.18 m, cage 중점 0.11 m, 손목 중점 0.222 m, 좌우 비대칭 0.10 m |
 | 안전 지표 | `--safety_metrics`: 단계별(navigation / BC-1 / BC-2) 테이블 접촉(팔·손 22개 link, > 1 N), 최대 힘, impulse, 손가락–테이블 최소 거리. 기존 성공 지표와 따로 기록합니다. |
+
+### 1.1 관측과 GT 사용 범위
+각 입력이 코드에서 만들어지는 경로를 추적한 결과입니다(2026-10-25).
+
+| 구성 | 쓰임 | 시뮬레이션에서 값의 출처 | 실제 로봇에서 필요한 것 |
+|---|---|---|---|
+| PPO navigation 관측 | 정책 입력 | GT 목표 위치·방향·거리, GT base 선속도 | 인식 기반 목표 추정, 속도 추정 |
+| BC 고유감각(IMU 각속도·중력 방향, 관절 위치·속도, 5 step 이력) | 정책 입력 | 시뮬레이터 값. 평가와 데이터 수집에서는 관측 잡음을 끔 | 실제 센서(잡음에 대한 강건성은 미검증) |
+| BC 직전 action(43-D) | 정책 입력 | 직전 관절 목표 | 같음 |
+| Box·Bin QR 위치(카메라 좌표)와 보임 여부 | 정책 입력 | GT 위치를 D435 카메라 모델(장착 위치, 시야각, 해상도, 거리 범위)로 변환. 시야 밖이면 0, 잡음 없음 | QR 검출기(오차·지연·오검출 미검증) |
+| Table 위치(카메라 좌표) | 정책 입력 | GT 위치. 보임 여부와 관계없이 항상 제공 | 테이블 인식 |
+| 속도 명령(3-D) | 정책 입력 | BC-1: 위 Box QR 측정과 로봇 기구학으로 계산한 pre-grasp 명령. BC-2 실행 중에는 0 | QR 검출기 |
+| BC-1 → BC-2 gate | 전환 판단 | 손끝·손목 위치(기구학)와 GT 박스 위치. lab FSM과 같은 방식 | 인식 기반 판단 |
+| 테이블 안전 정지 | navigation 목표 조정 | GT 테이블 앞 모서리 위치 | 테이블 인식 |
+| 안전 지표 | 기록 전용 | GT 접촉 센서와 형상 | 해당 없음 |
+
+- 학습은 HDF5의 `student_observation` 데이터만 읽습니다(lab `phase_bc`가 검사). 같은 파일에 기록된 privileged 값(박스·손목 pose, 접촉 등)은 확인용이며 입력으로 쓰지 않습니다.
+- 평가 중 정책 입력은 학습 데이터와 같은 함수(`arena_teacher_runtime.student_observation`)로 만듭니다.
 
 ## 2. 결과 (시뮬레이션, Arena WBC)
 
@@ -294,7 +313,7 @@ python scripts/approach/train_bc1_safe.py --accepted accepted_bc2.json --output 
 | `--reseed_each_episode` | episode마다 (seed, episode)로 다시 seed를 정해, 변형 간 시작 조건을 맞춤 |
 
 ## 9. 한계
-- **GT 관측**: 맨 위 안내를 참고하세요. 실제 로봇 배포 전에 인식과 상태 추정으로 교체가 필요합니다.
+- **GT 관측**: 맨 위 안내와 1.1절을 참고하세요. 실제 로봇에 배포하기 전에 인식과 상태 추정으로 바꾸고, 잡음과 오검출에 대해 다시 검증해야 합니다.
 - **시뮬레이션 전용 설정**: pre-grasp margin 7 cm는 이 WBC의 처짐(PD, 중력 보상 없음)에 맞춘 값입니다. 다른 제어기나 실제 로봇에서는 다시 정해야 합니다.
 - **FSM 통합**: PPO v7과 BC v3.1은 FSM에서 아직 시험하지 않았습니다.
 - **표본 크기**: 조건당 10–20 episode입니다.

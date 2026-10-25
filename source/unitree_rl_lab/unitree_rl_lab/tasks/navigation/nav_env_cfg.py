@@ -151,7 +151,7 @@ class BoxNavHomieEvalEnvCfg(BoxNavHomieEnvCfg):
 
 
 # ------------------------------------------------------------------------------------------------------ v6
-# v6 = v5 + the changes motivated by the v5 Arena-WBC verification (outputs/approach_p3/reports/PPO_v5_verification_2026-10-20.md):
+# v6 = v5 + the changes motivated by the Arena-WBC verification of v5 (60 identical starts, 2026-10-20):
 #   actions      slower caps, slow backward walking, elliptical planar cap, command rate limit (no bang-bang, no
 #                instant braking)                                     -> NAV_ACTION_PROFILES["v6"]
 #   observation  + the rate-limited command actually sent to Homie (state of the action filter)

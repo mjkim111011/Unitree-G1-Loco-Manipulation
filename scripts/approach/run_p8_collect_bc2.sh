@@ -2,8 +2,8 @@
 # Phase-8 BC-2 v3 data: BC-1 v3 (collision-free approach) up to the existing BC-1 -> BC-2 gate, then the Arena Teacher
 # continues grasp/lift on the safe continuation path (source path raised by a constant lift that keeps the hands off the
 # table) and records BC-2 demos.  The grasp-readiness gate (GATE_TIP_MAX, default off) is not used: it lowered the BC-1
-# end clearance by ~1 cm in paired box +1 cm runs.  (The 4/6 contacts of the first collection, logs/collect_bc2/
-# *.stopped_rg45.log, recurred identically without it: they come from BC-1 v3's thin pre-grasp margin, see the report.)
+# end clearance by ~1 cm in paired box +1 cm runs.  (The table contacts of the first BC-1 v3 collection recurred
+# identically without it: they came from BC-1 v3's thin pre-grasp margin, which v3.1 raises to 7 cm.)
 # MARGIN_LATE sets the continuation lift (late margin over the cage formation).  FORCE_HANDOFF="LO HI" adds BC-2 demos from
 # early handoffs (BC-2 v3.1 failed 7/13 after gates at steps <= 116, where it had 6 demos; the deployed gate is unchanged).  New HDF5 files next to the run directories
 # (outputs/approach_p8/collect_bc2/); nothing existing is overwritten.  Demos are filtered afterwards

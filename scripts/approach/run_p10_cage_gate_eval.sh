@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Phase 10 (PAUSED 2026-10-25 by the user; GPU reassigned): full re-evaluation of the cage readiness gate on the 10
+# Phase 10 (not run yet): full re-evaluation of the cage readiness gate on the 10
 # phase-8 conditions (160 episodes), paired with the stored phase-8 baseline (existing gate, strict collision-free E2E
-# 149/160).  Nothing has been run with this script yet.  To resume, run it as is (about 6 h on two Isaac processes):
+# 149/160).  Run it as is (about 6 h on two Isaac processes):
 #
 #   nohup scripts/approach/run_p10_cage_gate_eval.sh > outputs/approach_p10/logs/cage_gate_eval.log 2>&1 &
 #
