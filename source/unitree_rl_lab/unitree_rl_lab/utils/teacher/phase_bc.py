@@ -1215,6 +1215,17 @@ class NormalizationStats:
         scale[scale < minimum_scale] = 1.0
         return cls(mean.astype(np.float32), scale.astype(np.float32))
 
+    def with_scale_floor(self, floor: np.ndarray) -> "NormalizationStats":
+        """Return a copy whose scales are at least ``floor`` (per dimension)."""
+        floor = np.asarray(floor, dtype=np.float32)
+        if (
+            floor.shape != self.scale.shape
+            or not np.isfinite(floor).all()
+            or np.any(floor < 0.0)
+        ):
+            raise ValueError("scale floor must be finite, non-negative and match the scale")
+        return NormalizationStats(self.mean.copy(), np.maximum(self.scale, floor))
+
     def normalize(self, value: np.ndarray) -> np.ndarray:
         return (np.asarray(value, dtype=np.float32) - self.mean) / self.scale
 
@@ -1428,8 +1439,13 @@ def train_phase_policy(
     auxiliary_evaluation_arrays: Mapping[str, PhaseArrays] | None = None,
     select_last_epoch: bool = False,
     checkpoint_metadata_extra: Mapping[str, Any] | None = None,
+    observation_scale_floor: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Train one phase policy and publish its best validation checkpoint."""
+    """Train one phase policy and publish its best validation checkpoint.
+
+    ``observation_scale_floor`` optionally lower-bounds the freshly fitted
+    observation scales; the default keeps the original normalization.
+    """
 
     config.validate()
     ordered_action_names = validate_teacher_action_contract(
@@ -1478,9 +1494,16 @@ def train_phase_policy(
     initial_checkpoint_path: Path | None = None
     initial_checkpoint_sha256: str | None = None
     initial_state: dict[str, torch.Tensor] | None = None
+    floored_observation_dims = 0
     if initial_checkpoint is None:
         observation_stats = NormalizationStats.fit(train_arrays.observations)
         action_stats = NormalizationStats.fit(train_arrays.actions)
+        if observation_scale_floor is not None:
+            fitted_scale = observation_stats.scale
+            observation_stats = observation_stats.with_scale_floor(observation_scale_floor)
+            floored_observation_dims = int(np.sum(observation_stats.scale > fitted_scale))
+    elif observation_scale_floor is not None:
+        raise ValueError("observation_scale_floor applies only to newly fitted statistics")
     else:
         initial_checkpoint_path = Path(initial_checkpoint).expanduser().resolve()
         loaded = _load_checkpoint(initial_checkpoint_path, "cpu")
@@ -1686,6 +1709,12 @@ def train_phase_policy(
         "checkpoint_selection": "last" if select_last_epoch else "validation",
         "metrics": metrics,
     }
+    if observation_scale_floor is not None:
+        metadata["observation_scale_floor"] = {
+            "applied": True,
+            "raised_dims": floored_observation_dims,
+            "values": np.asarray(observation_scale_floor, dtype=np.float32).tolist(),
+        }
     for key, value in (checkpoint_metadata_extra or {}).items():
         if key in metadata:
             raise ValueError(f"checkpoint metadata extra collides with {key!r}")
