@@ -27,6 +27,9 @@ parser.add_argument(
 parser.add_argument("--arena_root", default=default_arena_root())
 parser.add_argument("--task", default="Unitree-G1-43dof-BoxPickPlace")
 parser.add_argument("--episodes", type=int, default=20)
+parser.add_argument("--video_follow_robot", action="store_true", help="Camera follows the robot (same view as the carry recorder)")
+parser.add_argument("--video_resolution", type=int, nargs=2, default=None)
+parser.add_argument("--seed", type=int, default=None, help="Environment seed (default: task config); use different seeds for separate snapshot batches")
 parser.add_argument("--episode_seconds", type=float, default=10.0)
 parser.add_argument("--hold_seconds", type=float, default=2.0)
 parser.add_argument("--box_x_range", type=float, nargs=2, default=(0.618, 0.622))
@@ -143,6 +146,8 @@ def _configure_env():
         "x": tuple(args_cli.box_x_range),
         "y": tuple(args_cli.box_y_range),
     }
+    if args_cli.seed is not None:
+        cfg.seed = int(args_cli.seed)
     cfg.terminations.time_out = None
     cfg.terminations.bad_orientation = None
     cfg.terminations.success = None
@@ -153,6 +158,13 @@ def _configure_env():
         cfg.viewer.lookat = (0.55, -0.10, 0.85)
         cfg.viewer.origin_type = "env"
         cfg.viewer.env_index = 0
+        if args_cli.video_follow_robot:
+            cfg.viewer.origin_type = "asset_root"
+            cfg.viewer.asset_name = "robot"
+            cfg.viewer.eye = (1.0, -0.8, 0.5)
+            cfg.viewer.lookat = (0.3, 0.0, 0.05)
+        if args_cli.video_resolution is not None:
+            cfg.viewer.resolution = tuple(args_cli.video_resolution)
     return cfg
 
 
@@ -421,6 +433,7 @@ def main() -> None:
         "teacher_wrist_z_offset_m": args_cli.wrist_z_offset_m,
         "teacher_hold_lift_margin_m": args_cli.hold_lift_margin_m,
         "teacher_flat_palm_grip": bool(args_cli.flat_palm_grip),
+        "seed": args_cli.seed,
     }
     evaluator_config_sha256 = hashlib.sha256(
         json.dumps(

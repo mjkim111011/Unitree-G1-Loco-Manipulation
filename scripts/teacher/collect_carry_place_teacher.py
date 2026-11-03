@@ -175,6 +175,22 @@ parser.add_argument("--box_static_friction", type=float, default=1.5)
 parser.add_argument("--box_dynamic_friction", type=float, default=1.2)
 parser.add_argument("--box_restitution", type=float, default=0.0)
 parser.add_argument("--randomize_work_area", action="store_true")
+parser.add_argument(
+    "--carry_backoff_m",
+    type=float,
+    default=0.0,
+    help="CARRY: walk straight back this far from the table before the bin search turns in place (0 = team default)",
+)
+parser.add_argument(
+    "--reject_table_contact",
+    action="store_true",
+    help="Count a trial as failed (not recorded) if any non-foot/hand robot link touches anything (the table) with >5 N",
+)
+parser.add_argument(
+    "--debug_table_clearance",
+    action="store_true",
+    help="Print the Box and robot-link clearance to the table top every 25 steps (diagnostic)",
+)
 parser.add_argument("--work_area_size_m", type=float, default=5.0)
 parser.add_argument("--keep_failures", action="store_true")
 parser.add_argument("--overwrite", action="store_true")
@@ -260,6 +276,7 @@ import uuid
 
 import gymnasium as gym
 import numpy as np
+from scipy.spatial.transform import Rotation
 import torch
 
 import isaaclab_tasks  # noqa: F401
@@ -426,6 +443,89 @@ def _configure_environment():
         if args_cli.video_resolution is not None:
             cfg.viewer.resolution = tuple(args_cli.video_resolution)
     return cfg
+
+
+class _TableClearanceProxy:
+    """Diagnostic: report how close the Box and robot links come to the table top."""
+
+    def __init__(self, env, verbose: bool = True):
+        self._env = env
+        self._verbose = verbose
+        self._steps = 0
+        self._trial_min = None
+        self.trial_contact_steps = 0
+
+    def __getattr__(self, name):
+        return getattr(self._env, name)
+
+    def _clearance(self):
+        scene = self._env.scene
+        table = scene["table_top"]
+        centre = table.data.root_pos_w[0].detach().cpu().numpy()
+        half = np.array([0.20, 0.20, 0.04])
+
+        def aabb_distance(points):
+            delta = np.maximum(np.abs(points - centre) - half, 0.0)
+            return np.linalg.norm(delta, axis=-1)
+
+        box = scene["box"]
+        box_pos = box.data.root_pos_w[0].detach().cpu().numpy()
+        quat = box.data.root_quat_w[0].detach().cpu().numpy()
+        rotation = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_matrix()
+        corners = np.array([[sx, sy, sz] for sx in (-0.1, 0.1) for sy in (-0.1, 0.1) for sz in (-0.1, 0.1)])
+        box_points = box_pos + corners @ rotation.T
+        robot = scene["robot"]
+        links = robot.data.body_pos_w[0].detach().cpu().numpy()
+        link_distance = aabb_distance(links)
+        nearest = int(np.argmin(link_distance))
+        touching = []
+        sensor = scene.sensors.get("contact_forces") if hasattr(scene, "sensors") else None
+        if sensor is not None and sensor.data.net_forces_w is not None:
+            forces = torch.linalg.vector_norm(sensor.data.net_forces_w[0], dim=-1).detach().cpu().numpy()
+            for index, name in enumerate(sensor.body_names):
+                if forces[index] > 5.0 and not any(key in name for key in ("ankle", "hand", "wrist")):
+                    touching.append(f"{name}:{forces[index]:.0f}N")
+        self._touching = touching
+        return float(aabb_distance(box_points).min()), float(link_distance[nearest]), robot.body_names[nearest]
+
+    def step(self, action):
+        result = self._env.step(action)
+        self._steps += 1
+        box_gap, link_gap, link_name = self._clearance()
+        if self._trial_min is None or box_gap < self._trial_min[0]:
+            self._trial_min = (box_gap, self._trial_min[1] if self._trial_min else 9.0, self._trial_min[2] if self._trial_min else "")
+        if link_gap < self._trial_min[1]:
+            self._trial_min = (self._trial_min[0], link_gap, link_name)
+        if self._touching:
+            self.trial_contact_steps += 1
+        if self._touching and self._verbose:
+            root = self._env.scene["robot"].data.root_pos_w[0].detach().cpu().numpy() - self._env.scene.env_origins[0].detach().cpu().numpy()
+            quat = self._env.scene["robot"].data.root_quat_w[0].detach().cpu().numpy()
+            yaw = np.degrees(Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler("zyx")[0])
+            command = self._env.command_manager.get_term("base_velocity").command[0].detach().cpu().numpy()
+            print(
+                f"[clearance] step={self._steps} non-foot contact: {' '.join(self._touching)} "
+                f"root=({root[0]:.2f},{root[1]:.2f}) yaw={yaw:.0f} cmd={np.round(command, 2)}",
+                flush=True,
+            )
+        if self._steps % 25 == 0 and self._verbose:
+            root = self._env.scene["robot"].data.root_pos_w[0].detach().cpu().numpy() - self._env.scene.env_origins[0].detach().cpu().numpy()
+            nav = self._env.command_manager.get_term("base_velocity")
+            print(
+                f"[clearance] step={self._steps} root=({root[0]:.2f},{root[1]:.2f}) cmd={np.round(nav.command[0].detach().cpu().numpy(), 2)} "
+                f"phase={int(self._env.task_phase[0])} box_to_table={box_gap*100:.1f}cm nearest_link={link_name} {link_gap*100:.1f}cm "
+                f"(min so far box {self._trial_min[0]*100:.1f}cm, link {self._trial_min[2]} {self._trial_min[1]*100:.1f}cm)",
+                flush=True,
+            )
+        return result
+
+    def reset(self, *args, **kwargs):
+        if self._trial_min is not None and self._verbose:
+            print(f"[clearance] trial min: box {self._trial_min[0]*100:.1f}cm, link {self._trial_min[2]} {self._trial_min[1]*100:.1f}cm", flush=True)
+        self._trial_min = None
+        self._steps = 0
+        self.trial_contact_steps = 0
+        return self._env.reset(*args, **kwargs)
 
 
 class _RecordingEnvProxy:
@@ -1125,6 +1225,8 @@ def _run_trial(
     success = False
     reason = "phase_horizon"
     staging_snapshot = None
+    backoff_origin = None
+    backoff_done = args_cli.carry_backoff_m <= 0.0
     for step in range(max_steps):
         requested_task_phase = 1 if args_cli.phase == "carry" else 2
         _synchronize_task_phase(env, requested_task_phase)
@@ -1136,6 +1238,15 @@ def _run_trial(
             scaled_navigation = (
                 navigation.command[0].detach().cpu().numpy() * navigation_scale
             )
+            if not backoff_done:
+                # Walk straight back from the table before the bin search turns in place.
+                pelvis_xy = pelvis_pose[:2].astype(np.float64)
+                if backoff_origin is None:
+                    backoff_origin = pelvis_xy.copy()
+                if np.linalg.norm(pelvis_xy - backoff_origin) < args_cli.carry_backoff_m:
+                    scaled_navigation = np.array([-0.15 * navigation_scale, 0.0, 0.0], dtype=np.float32)
+                else:
+                    backoff_done = True
             if staging_reached:
                 scaled_navigation = np.zeros(3, dtype=np.float32)
             pre_observation = torch.as_tensor(
@@ -1468,7 +1579,12 @@ def _run_trial(
             reason = "bilateral_hold_lost"
             break
 
+    table_contact_steps = env.trial_contact_steps if isinstance(env, _TableClearanceProxy) else None
+    if args_cli.reject_table_contact and success and table_contact_steps:
+        success = False
+        reason = "table_contact"
     final_metadata = {
+        "table_contact_steps": table_contact_steps,
         "source_episode": snapshot.source_episode,
         "source_step": snapshot.source_step,
         "success": success,
@@ -1740,6 +1856,8 @@ def main() -> None:
         env = _RecordingEnvProxy(gym_env)
     else:
         env = gym_env.unwrapped
+    if args_cli.debug_table_clearance or args_cli.reject_table_contact:
+        env = _TableClearanceProxy(env, verbose=args_cli.debug_table_clearance)
     # Full joint state arrays are restored by index, so provenance also
     # requires the exact articulation order used by the producer.
     try:
@@ -1981,6 +2099,8 @@ def main() -> None:
             if args_cli.phase == "place"
             else None
         ),
+        "carry_backoff_m": args_cli.carry_backoff_m,
+        "reject_table_contact": bool(args_cli.reject_table_contact),
         "carry_realized_arm_hand_targets_locked": args_cli.phase == "carry",
         "teacher_high_level_action_requires_grasp_lock_postprocessor_for_carry": (
             args_cli.phase == "carry"
