@@ -55,6 +55,17 @@ parser.add_argument("--bc_place_checkpoint", type=str, default=None)
 parser.add_argument("--bc2_gate", type=str, default=None)
 parser.add_argument("--residual_scale", type=float, default=0.20)
 parser.add_argument("--residual_handoff_steps", type=int, default=100)
+parser.add_argument(
+    "--transition_policy",
+    action="store_true",
+    help="Train the WBC-to-BC3 transition gate (Unitree-G1-43dof-CarryTransition); uses --bc_carry_checkpoint.",
+)
+parser.add_argument("--transition_snapshots", nargs="+", default=None, help="LOADED_STAND_END snapshot stores")
+parser.add_argument("--transition_stage", type=int, choices=(1, 2), default=1, help="1: gate only, 2: gate + CoM")
+parser.add_argument(
+    "--transition_stage1_checkpoint", type=str, default=None,
+    help="Initialize a stage-2 actor/critic from this stage-1 model checkpoint",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -125,6 +136,7 @@ from unitree_rl_lab.utils.export_deploy_cfg import export_deploy_cfg
 from unitree_rl_lab.utils.rnd_safety import install_rnd_safety_mask
 from unitree_rl_lab.utils.bc_residual import BcResidualActionWrapper, ResidualNominalCfg
 from unitree_rl_lab.utils.teacher.skill_fsm import SkillPhase
+from unitree_rl_lab.utils.teacher.transition_gate import TransitionGateCfg
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -158,6 +170,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # controller layered on top of it.
         agent_cfg.policy.init_noise_std = 0.05
         agent_cfg.algorithm.entropy_coef = min(agent_cfg.algorithm.entropy_coef, 5.0e-4)
+    if args_cli.transition_policy:
+        if args_cli.bc_residual:
+            raise ValueError("--transition_policy and --bc_residual are mutually exclusive")
+        if not args_cli.bc_carry_checkpoint or not args_cli.transition_snapshots:
+            raise ValueError("--transition_policy requires --bc_carry_checkpoint and --transition_snapshots")
+        if args_cli.transition_stage1_checkpoint and args_cli.transition_stage != 2:
+            raise ValueError("--transition_stage1_checkpoint only initializes stage 2")
+        agent_cfg.experiment_name = f"g1_43dof_carry_transition_stage{args_cli.transition_stage}"
+        if args_cli.transition_stage == 2:
+            env_cfg.rewards.weight_shift_at_first_swing.weight = 1.0
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -216,6 +238,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"bounded PPO residual scale {args_cli.residual_scale}."
         )
 
+    transition_controller = None
+    if args_cli.transition_policy:
+        from unitree_rl_lab.utils.transition_policy import (
+            CarryTransitionController,
+            TransitionPolicyCfg,
+            TransitionPolicyWrapper,
+        )
+
+        transition_controller = CarryTransitionController(
+            env.unwrapped,
+            carry_checkpoint=args_cli.bc_carry_checkpoint,
+            snapshot_paths=args_cli.transition_snapshots,
+            cfg=TransitionPolicyCfg(
+                stage=args_cli.transition_stage,
+                gate=TransitionGateCfg(step_dt=env.unwrapped.step_dt),
+            ),
+        )
+        env = TransitionPolicyWrapper(env, transition_controller)
+        print(
+            f"[INFO] Transition policy stage {args_cli.transition_stage} over frozen WBC anchor + BC3 "
+            f"({transition_controller.pool_size} snapshots)."
+        )
+
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
@@ -233,7 +278,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
     # wrap around environment for rsl-rl
-    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    if transition_controller is not None:
+        from unitree_rl_lab.utils.transition_policy import TransitionRslRlVecEnvWrapper
+
+        env = TransitionRslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    else:
+        env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # create runner from rsl-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
@@ -246,6 +296,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         torch.nn.init.zeros_(actor_linear_layers[-1].weight)
         torch.nn.init.zeros_(actor_linear_layers[-1].bias)
         print("[INFO] Zero-initialized PPO residual mean at the frozen BC nominal action.")
+    if transition_controller is not None and not agent_cfg.resume:
+        from unitree_rl_lab.utils.transition_policy import initialize_transition_actor
+
+        initialize_transition_actor(runner.alg.policy, stage1_checkpoint=args_cli.transition_stage1_checkpoint)
     # Box pick-and-place exposes this internal-only observation group.  It
     # prevents RND from rewarding unsafe/falling states without patching the
     # environment-wide rsl_rl installation used by other tasks.
@@ -270,7 +324,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with open(residual_path, "w", encoding="utf-8") as stream:
             json.dump(residual_wrapper.provenance(), stream, indent=2, sort_keys=True)
             stream.write("\n")
-    export_deploy_cfg(env.unwrapped, log_dir, agent_cfg.obs_groups["policy"])
+    if transition_controller is not None:
+        import json
+
+        with open(os.path.join(log_dir, "params", "transition_policy.json"), "w", encoding="utf-8") as stream:
+            json.dump(transition_controller.provenance(), stream, indent=2, sort_keys=True)
+            stream.write("\n")
+    else:
+        export_deploy_cfg(env.unwrapped, log_dir, agent_cfg.obs_groups["policy"])
     # copy the environment configuration file to the log directory
     shutil.copy(
         inspect.getfile(env_cfg.__class__),

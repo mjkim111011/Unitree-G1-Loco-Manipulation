@@ -26,9 +26,15 @@ SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS = ("1.0.0", "2.0.0", SNAPSHOT_SCHEMA_VERSION)
 ROLLOUT_PROVENANCE = "physical_rollout_capture"
 
 
+class SnapshotGateError(ValueError):
+    """A real rollout state is not eligible to seed the next skill."""
+
+
 class SnapshotKind(IntEnum):
     BILATERAL_HOLD = 0
     CARRY_AT_STAGING = 1
+    # Start of CARRY after the loaded WBC stand; ``last_action`` is the WBC anchor.
+    LOADED_STAND_END = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,16 +124,16 @@ class PhysicalSnapshot:
                 "snapshot requires a source episode, non-negative step, and environment id"
             )
         if self.left_contact_count < 1 or self.right_contact_count < 1:
-            raise ValueError("snapshot requires Box-filtered contact from both hands")
+            raise SnapshotGateError("snapshot requires Box-filtered contact from both hands")
         if (
             self.lift_height_m < lift_threshold_m
             or self.stable_hold_steps < hold_steps_required
         ):
-            raise ValueError(
+            raise SnapshotGateError(
                 "snapshot does not satisfy strict lift and continuous hold gates"
             )
         if self.bad_orientation or self.box_dropped:
-            raise ValueError(
+            raise SnapshotGateError(
                 "unsafe or dropped-Box snapshots cannot seed a later skill"
             )
         if np.any(np.asarray(self.box_size) <= 0.0) or self.box_mass_kg <= 0.0:
@@ -137,6 +143,8 @@ class PhysicalSnapshot:
             raise ValueError(
                 "place snapshots must come from a real carry rollout at staging"
             )
+        if kind == SnapshotKind.LOADED_STAND_END and self.task_phase != 1:
+            raise ValueError("loaded-stand snapshots must be captured in the CARRY task phase")
         return self
 
 
@@ -176,12 +184,19 @@ class PhysicalSnapshotStore:
         self._groups = self._file.create_group("snapshots", track_order=True)
         self._closed = False
         self._count = 0
+        self._checkpoint_published = False
+        self._checkpoint_count = 0
 
     @property
     def count(self) -> int:
         """Number of snapshots appended to the still-open store."""
 
         return self._count
+
+    @property
+    def checkpoint_count(self) -> int:
+        """Number of snapshots in the last successfully published checkpoint."""
+        return self._checkpoint_count
 
     def append(self, snapshot: PhysicalSnapshot, *, name: str | None = None) -> str:
         snapshot.validate()
@@ -250,16 +265,51 @@ class PhysicalSnapshotStore:
         self._file.flush()
         return name
 
+    def checkpoint(self) -> Path:
+        """Publish a closed, readable copy without ending collection.
+
+        Keep the last complete checkpoint if a later rollout, write, or process
+        fails. Only the transition collector opts into this behavior.
+        """
+        if self._closed:
+            raise RuntimeError("snapshot store is closed")
+        if self._count == 0:
+            raise RuntimeError("cannot publish an empty snapshot store")
+        self._file.flush()
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{self.path.name}.checkpoint.", suffix=".partial", dir=self.path.parent
+        )
+        os.close(fd)
+        temporary = Path(temporary)
+        try:
+            with h5py.File(temporary, "w", track_order=True) as checkpoint:
+                for key, value in self._file.attrs.items():
+                    checkpoint.attrs[key] = value
+                checkpoint.attrs["num_snapshots"] = self._count
+                checkpoint.attrs["collection_status"] = "in_progress"
+                for key in self._file:
+                    self._file.copy(key, checkpoint)
+            if self._overwrite or self._checkpoint_published:
+                os.replace(temporary, self.path)
+            else:
+                os.link(temporary, self.path)
+            self._checkpoint_published = True
+            self._checkpoint_count = self._count
+        finally:
+            temporary.unlink(missing_ok=True)
+        return self.path
+
     def finalize(self) -> Path:
         if self._closed:
             raise RuntimeError("snapshot store is closed")
         if len(self._groups) == 0:
             raise RuntimeError("cannot publish an empty snapshot store")
         self._file.attrs["num_snapshots"] = self._count
+        self._file.attrs["collection_status"] = "complete"
         self._file.flush()
         self._file.close()
         self._closed = True
-        if self._overwrite:
+        if self._overwrite or self._checkpoint_published:
             os.replace(self.partial_path, self.path)
         else:
             os.link(self.partial_path, self.path)
