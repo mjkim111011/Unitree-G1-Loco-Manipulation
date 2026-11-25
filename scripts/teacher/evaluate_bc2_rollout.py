@@ -10,6 +10,8 @@ import argparse
 import hashlib
 import json
 import math
+import time
+import traceback
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
@@ -21,6 +23,66 @@ parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--carry_checkpoint", default=None,
                     help="Continue live into a 43-D Carry policy after BC2 succeeds")
 parser.add_argument("--carry_seconds", type=float, default=16.0)
+parser.add_argument(
+    "--carry_blend_steps", type=int, default=0,
+    help="Blend the last WBC target into BC3 over N control steps; 0 preserves the baseline",
+)
+parser.add_argument(
+    "--transition_checkpoint", default=None,
+    help="Learned WBC-to-BC3 transition gate (RSL-RL model_*.pt); replaces --carry_blend_steps",
+)
+parser.add_argument(
+    "--transition_snapshot_output", default=None,
+    help="Capture the WBC-to-BC3 transition start state (after the loaded stand) of every chain",
+)
+parser.add_argument("--transition_snapshot_input", nargs="+", default=None,
+                    help="Evaluate directly from the same saved LOADED_STAND_END states")
+parser.add_argument("--grasp_snapshot_input", nargs="+", default=None,
+                    help="Evaluate the BC2 -> (WBC bridge) -> BC3 handoff from saved BILATERAL_HOLD grasp states "
+                         "(evaluate_bc2_rollout.py --snapshot_output), so every bridge length starts identically")
+parser.add_argument("--grip_readiness", action="store_true",
+                    help="Before the BC3 handoff, close under-contacted fingers until both hands keep "
+                         "--grip_readiness_min_contacts Box contacts; the re-grip becomes BC3's arm/hand lock")
+parser.add_argument("--grip_readiness_min_contacts", type=int, default=2)
+parser.add_argument("--grip_readiness_max_seconds", type=float, default=1.0)
+parser.add_argument("--wbc_bridge_seconds", type=float, default=7.0,
+                    help="Loaded WBC bridge between BC2 and BC3: 7 = 2 s WBC interpolation + 5 s stand (baseline); "
+                         "2 / 0.5 = WBC interpolation only; 0 = no WBC, BC3 blends directly from BC2's last target")
+parser.add_argument("--transition_snapshot_offset", type=int, default=0,
+                    help="Offset in the seeded snapshot permutation (for isolated single-state runs)")
+parser.add_argument("--com_consistent_blend", action="store_true",
+                    help="M2: keep the capture point on the straight WBC-to-BC3 path during the "
+                         "--carry_blend_steps blend (leg/waist corrections in double support)")
+parser.add_argument("--com_consistent_gain", type=float, default=1.0)
+parser.add_argument("--transition_diagnostics", action="store_true",
+                    help="Read-only post-step CoM/support and staging telemetry; no target changes")
+parser.add_argument("--capture_command_guard", action="store_true",
+                    help="Experimental early-carry CoM guard on walking commands; fixed blend retained")
+parser.add_argument("--com_consistent_lead", type=float, default=1.0,
+                    help="M2 desired capture point runs this many times ahead of the posture blend (1 = original)")
+parser.add_argument("--com_predictive_blend", action="store_true",
+                    help="Experimental CoM/support candidate scoring, without posture residuals")
+parser.add_argument("--com_predictive_mode", choices=("v1", "v2"), default="v1",
+                    help="v1: one-step alpha increments; v2: whole remaining schedules over a 0.5 s horizon")
+parser.add_argument("--grip_compensation", action="store_true",
+                    help="Payload-aware arm support + squeeze offsets on the locked BC3 grasp targets")
+parser.add_argument("--grip_squeeze_factor", type=float, default=1.0)
+parser.add_argument("--com_stabilizer", choices=("off", "observe", "on"), default="off",
+                    help="Payload-aware capture-point stabilizer on BC3's leg/waist targets (observe = log only)")
+parser.add_argument("--com_stabilizer_reference", default=None,
+                    help="Per-contact-mode capture-point reference JSON (build_com_stabilizer_reference.py)")
+parser.add_argument("--com_stabilizer_gain", type=float, default=1.0)
+parser.add_argument("--walk_after_takeover", action="store_true",
+                    help="Fixed-blend ablation: start BC3's walking-command ramp only once the blend reaches 1")
+parser.add_argument("--com_command_gate", action="store_true",
+                    help="v2 only: start BC3's walking-command ramp once the CoM is centered and slow")
+parser.add_argument("--residual_checkpoint", default=None,
+                    help="Grip-aware leg/waist residual (RSL-RL model_*.pt of train.py --grip_residual) added "
+                         "after the direct-handoff blend and grasp lock; requires --wbc_bridge_seconds 0")
+parser.add_argument("--residual_box_obs_noise_m", type=float, default=None,
+                    help="Override the Box-estimate noise of the residual's actor input (default: as trained)")
+parser.add_argument("--residual_box_obs_delay_steps", type=int, default=None,
+                    help="Override the Box-estimate delay of the residual's actor input (default: as trained)")
 parser.add_argument("--rule_based_place", action="store_true",
                     help="Continue successful Carry into rule-based align/open/withdraw")
 parser.add_argument("--place_seconds", type=float, default=16.0)
@@ -38,6 +100,10 @@ parser.add_argument("--episode_seconds", type=float, default=10.0)
 parser.add_argument("--hold_seconds", type=float, default=2.0)
 parser.add_argument("--box_x_range", type=float, nargs=2, default=(0.618, 0.622))
 parser.add_argument("--box_y_range", type=float, nargs=2, default=(-0.002, 0.002))
+parser.add_argument("--box_mass_kg", type=float, default=0.2,
+                    help="Fixed physical Box mass in kg (mass randomization is disabled)")
+parser.add_argument("--snapshot_box_mass_kg", type=float, default=None,
+                    help="Box mass the transition snapshots were captured with, when --box_mass_kg differs")
 parser.add_argument("--overwrite", action="store_true")
 parser.add_argument(
     "--teacher_only",
@@ -57,7 +123,41 @@ parser.add_argument(
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.capture_command_guard and (not args_cli.carry_checkpoint or args_cli.com_consistent_blend
+        or args_cli.transition_checkpoint or args_cli.com_predictive_blend or args_cli.walk_after_takeover):
+    parser.error("Capture command guard requires Carry with fixed blending and no other transition gate")
 
+if args_cli.snapshot_box_mass_kg is not None and (
+    not args_cli.transition_snapshot_input
+    or not math.isfinite(args_cli.snapshot_box_mass_kg) or args_cli.snapshot_box_mass_kg <= 0
+):
+    parser.error("--snapshot_box_mass_kg must be positive and requires --transition_snapshot_input")
+if not math.isfinite(args_cli.box_mass_kg) or args_cli.box_mass_kg <= 0:
+    parser.error("--box_mass_kg must be finite and positive")
+if args_cli.carry_blend_steps < 0:
+    parser.error("--carry_blend_steps must be nonnegative")
+if args_cli.transition_snapshot_offset < 0 or (
+    args_cli.transition_snapshot_offset and not (args_cli.transition_snapshot_input or args_cli.grasp_snapshot_input)
+):
+    parser.error("snapshot offset must be nonnegative and requires snapshot input")
+if args_cli.com_predictive_blend and (not args_cli.carry_checkpoint or args_cli.transition_checkpoint or args_cli.carry_blend_steps):
+    parser.error("CoM predictive blending requires Carry and excludes learned/fixed blending options")
+if args_cli.com_consistent_blend and (
+    not args_cli.carry_checkpoint or args_cli.transition_checkpoint or args_cli.com_predictive_blend
+    or args_cli.carry_blend_steps <= 0
+):
+    parser.error("--com_consistent_blend needs Carry and a --carry_blend_steps blend, and excludes "
+                 "learned/CoM-predictive transitions")
+if (args_cli.com_predictive_mode != "v1" or args_cli.com_command_gate) and not args_cli.com_predictive_blend:
+    parser.error("--com_predictive_mode/--com_command_gate require --com_predictive_blend")
+if args_cli.com_stabilizer == "on" and not args_cli.com_stabilizer_reference:
+    parser.error("--com_stabilizer on requires --com_stabilizer_reference")
+if (args_cli.grip_compensation or args_cli.com_stabilizer != "off") and not args_cli.carry_checkpoint:
+    parser.error("grip compensation and the CoM stabilizer require --carry_checkpoint")
+if args_cli.walk_after_takeover and (args_cli.com_predictive_blend or args_cli.transition_checkpoint):
+    parser.error("--walk_after_takeover is the fixed-blend ablation of --com_command_gate")
+if args_cli.com_command_gate and args_cli.com_predictive_mode != "v2":
+    parser.error("--com_command_gate requires --com_predictive_mode v2")
 if (
     args_cli.episodes <= 0
     or min(args_cli.episode_seconds, args_cli.hold_seconds) <= 0.0
@@ -72,8 +172,53 @@ if any(
     parser.error("Box x/y ranges require MIN <= MAX")
 if args_cli.carry_checkpoint and (args_cli.teacher_only or args_cli.snapshot_output):
     parser.error("Carry preview cannot be combined with teacher_only or snapshot_output")
+if args_cli.transition_checkpoint and (not args_cli.carry_checkpoint or args_cli.carry_blend_steps):
+    parser.error("--transition_checkpoint requires --carry_checkpoint and excludes --carry_blend_steps")
+if args_cli.transition_snapshot_output and not args_cli.carry_checkpoint:
+    parser.error("--transition_snapshot_output requires --carry_checkpoint")
 if args_cli.rule_based_place and not args_cli.carry_checkpoint:
     parser.error("--rule_based_place requires --carry_checkpoint")
+if args_cli.transition_snapshot_input and (
+    not args_cli.carry_checkpoint or args_cli.teacher_only or args_cli.snapshot_output
+    or args_cli.transition_snapshot_output or args_cli.rule_based_place
+):
+    parser.error("snapshot input requires Carry and excludes teacher/snapshot output/place modes")
+if args_cli.grasp_snapshot_input and (
+    args_cli.transition_snapshot_input or not args_cli.carry_checkpoint or args_cli.teacher_only
+    or args_cli.snapshot_output or args_cli.transition_snapshot_output or args_cli.rule_based_place
+):
+    parser.error("--grasp_snapshot_input requires Carry and excludes transition-snapshot input, "
+                 "teacher/snapshot output and place modes")
+try:
+    from unitree_rl_lab.utils.teacher.wbc_bridge import BASELINE_BRIDGE_SECONDS, schedule_for
+    WBC_BRIDGE = schedule_for(args_cli.wbc_bridge_seconds, 0.02)
+except ValueError as exc:
+    parser.error(str(exc))
+if args_cli.grip_readiness and (
+    not args_cli.carry_checkpoint or args_cli.transition_snapshot_input
+    or args_cli.grip_readiness_min_contacts < 1 or not 0.1 <= args_cli.grip_readiness_max_seconds <= 10.0
+):
+    parser.error("--grip_readiness needs Carry from a grasp state (live chain or --grasp_snapshot_input), "
+                 ">= 1 contact and a 0.1-10 s limit")
+if args_cli.wbc_bridge_seconds != BASELINE_BRIDGE_SECONDS and (
+    args_cli.transition_snapshot_input or args_cli.transition_snapshot_output
+):
+    parser.error("transition snapshots are defined at the end of the 7 s bridge; "
+                 "use --grasp_snapshot_input to compare bridge lengths")
+
+if args_cli.residual_checkpoint and (
+    not args_cli.carry_checkpoint or args_cli.transition_snapshot_input or args_cli.wbc_bridge_seconds != 0.0
+    or args_cli.carry_blend_steps != 50 or args_cli.transition_checkpoint or args_cli.com_consistent_blend
+    or args_cli.com_predictive_blend or args_cli.grip_readiness or args_cli.grip_compensation
+    or args_cli.com_stabilizer != "off" or args_cli.capture_command_guard or args_cli.walk_after_takeover
+):
+    parser.error("--residual_checkpoint requires a live BC2 grasp or --grasp_snapshot_input, "
+                 "with --wbc_bridge_seconds 0 --carry_blend_steps 50 and no other "
+                 "transition, grip or CoM option")
+if (args_cli.residual_box_obs_noise_m is not None or args_cli.residual_box_obs_delay_steps is not None) and (
+    not args_cli.residual_checkpoint
+):
+    parser.error("residual Box-estimate overrides require --residual_checkpoint")
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -111,19 +256,32 @@ from unitree_rl_lab.utils.teacher.carry_runtime_contract import (
 )
 from unitree_rl_lab.utils.teacher.physical_snapshot_runtime import (
     capture_physical_snapshot,
+    restore_physical_snapshot,
+    restored_snapshot_gate,
 )
 from unitree_rl_lab.utils.teacher.physical_snapshots import (
     PhysicalSnapshotStore,
+    SnapshotGateError,
     SnapshotKind,
+    load_snapshots,
+    load_snapshot_store_metadata,
 )
 from unitree_rl_lab.utils.teacher.skill_fsm import SkillPhase
 from unitree_rl_lab.utils.teacher.student_observation import replace_velocity_command
 from unitree_rl_lab.utils.teacher_demo_recorder import DEFAULT_HIGH_LEVEL_ACTION_NAMES
 from unitree_rl_lab.utils.teacher.chain_evaluation import summarize_live_chain
+from unitree_rl_lab.utils.teacher.transition_gate import TransitionGateCfg, fixed_blend_weight
+from unitree_rl_lab.utils.teacher.wbc_bridge import wbc_interpolation_weight
+from unitree_rl_lab.utils.teacher.com_schedule_blend import walking_gate_open
+from unitree_rl_lab.tasks.locomotion.mdp.carry_transition import (
+    com_relative_to_feet_b,
+    foot_loads,
+    transition_policy_observation,
+)
 
 
 BOX_SIZE_M = 0.20
-BOX_MASS_KG = 0.20
+BOX_MASS_KG = args_cli.box_mass_kg
 TABLE_SURFACE_HEIGHT_M = 0.74
 
 
@@ -136,6 +294,9 @@ def _configure_env():
         entry_point_key="play_env_cfg_entry_point",
     )
     configure_fixed_teacher_scene(cfg, box_size_m=BOX_SIZE_M, box_mass_kg=BOX_MASS_KG)
+    # Per-process USD conversion directory; the seeded default collides across processes.
+    from unitree_rl_lab.utils.usd_cache import assign_unique_usd_dirs
+    assign_unique_usd_dirs(cfg.scene)
     if args_cli.seed is not None:
         cfg.seed = args_cli.seed
     cfg.events.reset_pick_place_scene.params["grasp_box_xy_range"] = {
@@ -167,18 +328,77 @@ def _policy_action(env, policy, observation: np.ndarray, student_bridge):
     return action_order_target(env, names, values)[0]
 
 
-def _continue_carry(gym_env, policy, bridge, initial_height):
+def _restored_start_features(env):
+    """Measured state at the common post-restore, pre-transition boundary."""
+    from isaaclab.utils.math import quat_apply_inverse, yaw_quat
+
+    robot, box = env.scene["robot"], env.scene["box"]
+    names = ["left_ankle_roll_link", "right_ankle_roll_link"]
+    feet_ids = robot.find_bodies(names, preserve_order=True)[0]
+    masses = robot.root_physx_view.get_masses().to(env.device)
+    com = (masses[:, :, None] * robot.data.body_com_pos_w).sum(1) / masses.sum(1)[:, None]
+    feet = robot.data.body_link_pos_w[:, feet_ids].mean(1)
+    relative = quat_apply_inverse(yaw_quat(robot.data.root_quat_w), com - feet)
+    sensor = env.scene.sensors["contact_forces"]
+    sensor_ids = sensor.find_bodies(names, preserve_order=True)[0]
+    loads = sensor.data.net_forces_w[:, sensor_ids, 2].clamp_min(0) / (masses.sum(1)[:, None] * 9.81)
+    return {
+        "robot_com_relative_feet_yaw_xy_m": relative[0, :2].detach().cpu().tolist(),
+        "foot_load_fraction": loads[0].detach().cpu().tolist(),
+        "base_angular_velocity_body": robot.data.root_ang_vel_b[0].detach().cpu().tolist(),
+        "projected_gravity_body": robot.data.projected_gravity_b[0].detach().cpu().tolist(),
+        "root_state": robot.data.root_link_state_w[0].detach().cpu().tolist(),
+        "joint_position": robot.data.joint_pos[0].detach().cpu().tolist(),
+        "joint_velocity": robot.data.joint_vel[0].detach().cpu().tolist(),
+        "box_state": box.data.root_link_state_w[0].detach().cpu().tolist(),
+        "last_action": env.action_manager.action[0].detach().cpu().tolist(),
+        "student_observation": student_observation(
+            env.observation_manager.compute(update_history=False)
+        )[0].detach().cpu().tolist(),
+    }
+
+
+def _continue_carry(
+    gym_env, policy, bridge, initial_height, transition_snapshots=None, episode=0, transition=None,
+    skip_stabilization=False, residual=None, residual_seed=0,
+):
     """Continue the same physical episode; never restore or reset the scene."""
     env = gym_env.unwrapped
     robot, box = env.scene["robot"], env.scene["box"]
     pelvis = body_id(robot, "pelvis")
+    wrist_ids = [body_id(robot, "left_wrist_yaw_link"), body_id(robot, "right_wrist_yaw_link")]
     term = env.action_manager.get_term("JointPositionAction")
     contract = validate_carry_runtime_contract(
         policy.carry_runtime_contract,
         expected_ordered_joint_names=term._joint_names,
     )
     locked = contract["locked_raw_joint_indices"]
+    grip_readiness_log = None
+    if args_cli.grip_readiness:
+        # Re-grip with BC2's last arm/leg targets before anything else; the result is
+        # the arm/hand lock reference BC3 (and the WBC bridge, if any) keeps.
+        from unitree_rl_lab.utils.teacher.grip_readiness import GripReadiness, GripReadinessCfg
+
+        def _regrip_step(raw):
+            env.task_phase[0] = 1
+            gym_env.step(raw)
+            env.task_phase[0] = 1
+            env.command_manager.compute(0.0)
+
+        regrip = GripReadiness(env, GripReadinessCfg(
+            min_contacts_per_hand=args_cli.grip_readiness_min_contacts,
+            max_steps=int(round(args_cli.grip_readiness_max_seconds / env.step_dt)),
+        ))
+        _, grip_readiness_log = regrip.run(
+            env.action_manager.action.detach().clone(), _regrip_step,
+            lambda: box_contact_counts(env),
+            lambda: float(box.data.root_link_pos_w[0, 2]) - initial_height,
+        )
+        print(f"[chain] grip readiness: ready={grip_readiness_log['ready']} steps={grip_readiness_log['steps']} "
+              f"contacts={grip_readiness_log['final_contacts']} "
+              f"max_finger_offset={grip_readiness_log['max_finger_offset_rad']:.3f}", flush=True)
     reference = env.action_manager.action.detach().clone()
+    unlocked_indices = [i for i in range(reference.shape[-1]) if i not in locked]
     box_pose = box.data.root_link_state_w[0, :7].detach().cpu().numpy()
     grasp = RealizedBimanualGrasp.capture(
         box_pose_wxyz=box_pose,
@@ -187,16 +407,37 @@ def _continue_carry(gym_env, policy, bridge, initial_height):
     )
     teacher = CarryTeacher(grasp, minimum_box_height_w=float(box_pose[2]))
     navigation = env.command_manager.get_term("base_velocity")
-    lost_contact = stable_staging = 0
+    diagnostics = None
+    if args_cli.transition_diagnostics:
+        from unitree_rl_lab.utils.teacher.transition_diagnostics import TransitionDiagnostics
+        diagnostics = TransitionDiagnostics(env, locked)
+    lost_contact = stable_staging = loaded_hold = 0
     staging_reached = False
-    # Match the snapshot runner: 100 handoff steps, then 250 loaded stand steps.
-    stabilization_steps = 350
+    # Baseline 7 s bridge: 100 WBC interpolation steps, then 250 loaded stand steps.
+    # A zero bridge never queries the WBC and blends BC3 directly from BC2's target.
+    if abs(env.step_dt - 0.02) > 1e-9:
+        raise RuntimeError("the WBC bridge schedule assumes 50 Hz control")
+    stabilization_steps = WBC_BRIDGE.total_steps
     trace = []
     previous_target = reference * term._scale + term._offset
+    carry_blend_reference = None
+    com_blender = None
+    consistent_blender = None
+    capture_guard = None
+    capture_guard_log = None
+    grip = None
+    stabilizer = None
+    takeover_step = None
+    walking_start_step = None
+    snapshot_capture = {"recorded": False, "reason": "transition_not_reached"}
     largest_target_jump = 0.0
     max_steps = stabilization_steps + math.ceil(args_cli.carry_seconds / env.step_dt)
-    print("[chain] GRASP_LIFT -> loaded stabilization -> CARRY", flush=True)
-    for step in range(max_steps):
+    start_step = stabilization_steps if skip_stabilization else 0
+    print("[chain] Restored transition start -> CARRY" if skip_stabilization else
+          "[chain] GRASP_LIFT -> CARRY (no WBC bridge)" if not WBC_BRIDGE.uses_wbc else
+          f"[chain] GRASP_LIFT -> WBC bridge {WBC_BRIDGE.total_steps * env.step_dt:.2f} s -> CARRY", flush=True)
+    carry_started_at = time.monotonic()
+    for step in range(start_step, max_steps):
         env.task_phase[0] = 1
         env.command_manager.compute(0.0)
         observation = env.observation_manager.compute(update_history=False)
@@ -209,23 +450,181 @@ def _continue_carry(gym_env, policy, bridge, initial_height):
             )
             names, values = bridge.step(bridge_request(env, high_level))
             action = action_order_target(env, names, values)[0]
-            if step < 100:
-                fraction = (step + 1) / 100.0
-                blend = fraction * fraction * (3.0 - 2.0 * fraction)
+            if step < WBC_BRIDGE.interpolation_steps:
+                blend = wbc_interpolation_weight(step, WBC_BRIDGE)
                 action = reference + blend * (action - reference)
         else:
             if carry_step == 0:
+                carry_blend_reference = env.action_manager.action.detach().clone()
+                if args_cli.capture_command_guard:
+                    from unitree_rl_lab.utils.teacher.capture_command_guard import CaptureCommandGuard
+                    capture_guard = CaptureCommandGuard(env, locked)
+                if args_cli.grip_compensation:
+                    from unitree_rl_lab.utils.teacher.grip_compensation import GripCompensationCfg, GripCompensator
+                    grip = GripCompensator(env, GripCompensationCfg(squeeze_factor=args_cli.grip_squeeze_factor))
+                if args_cli.com_stabilizer != "off":
+                    from unitree_rl_lab.utils.teacher.com_stabilizer import (
+                        ComStabilizer, ComStabilizerCfg, load_reference,
+                    )
+                    stabilizer_cfg = ComStabilizerCfg(step_dt=env.step_dt, gain=args_cli.com_stabilizer_gain)
+                    if args_cli.com_stabilizer_reference:
+                        from dataclasses import replace
+                        stabilizer_cfg = replace(
+                            stabilizer_cfg, reference_xy=load_reference(args_cli.com_stabilizer_reference))
+                    stabilizer = ComStabilizer(env, locked, stabilizer_cfg, active=args_cli.com_stabilizer == "on")
+                if args_cli.com_consistent_blend:
+                    from unitree_rl_lab.utils.teacher.com_consistent_blend import (
+                        ComConsistentBlendCfg, ComConsistentBlender,
+                    )
+                    consistent_blender = ComConsistentBlender(
+                        env, carry_blend_reference, locked,
+                        ComConsistentBlendCfg(step_dt=env.step_dt, blend_steps=args_cli.carry_blend_steps,
+                                              gain=args_cli.com_consistent_gain,
+                                              lead=args_cli.com_consistent_lead),
+                    )
+                if args_cli.com_predictive_blend and args_cli.com_predictive_mode == "v2":
+                    from unitree_rl_lab.utils.teacher.com_schedule_blend import ComScheduleBlender
+                    com_blender = ComScheduleBlender(env, carry_blend_reference, locked)
+                elif args_cli.com_predictive_blend:
+                    from unitree_rl_lab.utils.teacher.com_predictive_blend import ComPredictiveBlender
+                    com_blender = ComPredictiveBlender(env, carry_blend_reference, locked)
+                if transition_snapshots is not None:
+                    left, right = box_contact_counts(env)
+                    try:
+                        snapshot = capture_physical_snapshot(
+                            env,
+                            kind=SnapshotKind.LOADED_STAND_END,
+                            env_id=0,
+                            source_episode=f"live_episode_{episode}",
+                            source_step=step,
+                            student_observation=student_observation(observation)[0],
+                            box_initial_height_m=initial_height,
+                            left_contact_count=left,
+                            right_contact_count=right,
+                            stable_hold_steps=loaded_hold,
+                            at_staging=False,
+                            bad_orientation=False,
+                            box_dropped=False,
+                            box_size=np.full(3, BOX_SIZE_M),
+                            box_mass_kg=BOX_MASS_KG,
+                        )
+                    except SnapshotGateError as exc:
+                        snapshot_capture = {
+                            "recorded": False, "reason": str(exc),
+                            "stable_hold_steps": loaded_hold,
+                            "left_contact_count": left, "right_contact_count": right,
+                            "lift_height_m": float(box.data.root_link_pos_w[0, 2]) - initial_height,
+                        }
+                        print(f"[snapshot] skipped episode={episode}: {snapshot_capture}", flush=True)
+                    else:
+                        transition_snapshots.append(snapshot)
+                        path = transition_snapshots.checkpoint()
+                        snapshot_capture = {"recorded": True, "reason": "valid_loaded_stand_end"}
+                        print(
+                            f"[snapshot] saved count={transition_snapshots.count} path={path}",
+                            flush=True,
+                        )
+                if transition is not None:
+                    transition[0].begin_live(initial_height)
+                if residual is not None:
+                    residual[0].generator.manual_seed(int(residual_seed))
+                    residual[0].begin_live_residual(carry_blend_reference, initial_height)
                 print("[chain] CARRY Student walking", flush=True)
-            velocity = navigation.command[0].detach().cpu().numpy() * carry_navigation_scale(carry_step, contract)
-            if staging_reached:
-                velocity = np.zeros(3, dtype=np.float32)
-            obs_np = replace_velocity_command(
-                student_observation(observation).detach().cpu().numpy(), velocity[None, :]
-            )
-            action = _policy_action(env, policy, obs_np, None)
+            if transition is not None:
+                # Same observation, gate, CoM guide and composition as training.
+                controller, actor = transition
+                with torch.inference_mode():
+                    gate_action = actor(transition_policy_observation(env))
+                action = controller.compose(gate_action)
+            else:
+                if args_cli.com_command_gate:
+                    # Hold BC3's walking command at zero until it owns a centered, slow CoM.
+                    if walking_start_step is None:
+                        state = com_blender.measure()
+                        if walking_gate_open(
+                            com_blender.alpha, state["capture_margin"],
+                            float(torch.linalg.vector_norm(state["com_velocity_xy"])),
+                            carry_step - (takeover_step if takeover_step is not None else carry_step),
+                            com_blender.cfg,
+                        ):
+                            walking_start_step = carry_step
+                    scale = 0.0 if walking_start_step is None else carry_navigation_scale(
+                        carry_step - walking_start_step, contract)
+                elif args_cli.walk_after_takeover:
+                    # Same timing as an immediately-open CoM gate, without any CoM criterion.
+                    start = args_cli.carry_blend_steps
+                    scale = 0.0 if carry_step < start else carry_navigation_scale(carry_step - start, contract)
+                    if carry_step >= start and walking_start_step is None:
+                        walking_start_step = carry_step
+                else:
+                    scale = carry_navigation_scale(carry_step, contract)
+                velocity = navigation.command[0].detach().cpu().numpy() * scale
+                if capture_guard is not None:
+                    guard_scale, capture_guard_log = capture_guard.step(carry_step)
+                    velocity = velocity * guard_scale
+                if staging_reached:
+                    velocity = np.zeros(3, dtype=np.float32)
+                obs_np = replace_velocity_command(
+                    student_observation(observation).detach().cpu().numpy(), velocity[None, :]
+                )
+                action = _policy_action(env, policy, obs_np, None)
+                bc3_raw_action = action.detach().clone()
+        # Diagnose the policy boundary before blending or applying the grasp lock.
+        candidate_target = action * term._scale + term._offset
+        candidate_jump = float(torch.max(torch.abs(
+            candidate_target[:, unlocked_indices] - previous_target[:, unlocked_indices]
+        )))
+        blend_weight = 1.0
+        com_debug = None
+        consistent_log = None
+        if carry_step >= 0 and consistent_blender is not None:
+            # M2 replaces the fixed blend; it returns BC3's own targets once alpha = 1.
+            action, consistent_log = consistent_blender.step(action, carry_step, previous_target)
+            blend_weight = consistent_log["alpha"]
+        elif carry_step >= 0:
+            # Use a fixed anchor: the final command actually sent by the WBC.
+            # The incoming BC3 output is recomputed from the live state each step.
+            if com_blender is not None:
+                left_now, right_now = box_contact_counts(env)
+                action, com_debug = com_blender.step(
+                    action, carry_step, previous_target, left_now > 0 and right_now > 0,
+                )
+                blend_weight = com_debug["alpha"]
+                if blend_weight >= 1.0 and takeover_step is None:
+                    takeover_step = carry_step
+            else:
+                blend_weight = fixed_blend_weight(carry_step, args_cli.carry_blend_steps)
+                if blend_weight < 1.0:
+                    action = carry_blend_reference + blend_weight * (action - carry_blend_reference)
         action[:, locked] = reference[:, locked]
+        residual_log = None
+        if carry_step >= 0 and residual is not None:
+            # Same observation, rate limit and envelope as training; added after blend and lock.
+            controller, actor, variant = residual
+            from unitree_rl_lab.tasks.locomotion.mdp.grip_residual import residual_policy_observation
+            with torch.no_grad():
+                controller.live_step(carry_step, bc3_raw_action)
+                residual_command = actor(residual_policy_observation(env, variant))
+                action = action + controller.residual_offset(residual_command)
+            residual_log = {
+                "max_abs_residual_rad": float(controller.applied.abs().max()),
+                "max_abs_command": float(residual_command.abs().max()),
+                "applied_rad": controller.applied[0].detach().cpu().tolist(),
+            }
+        stabilizer_log = None
+        grip_log = None
+        if carry_step >= 0 and grip is not None:
+            grip_offsets = grip.offsets()
+            action = action + grip_offsets[None, :]
+            grip_log = {"extra_mass_kg": grip.extra_mass,
+                        "max_joint_offset_rad": float((grip_offsets * term._scale).abs().max())}
+        if carry_step >= 0 and stabilizer is not None:
+            action, stabilizer_log = stabilizer.step(action)
         absolute_target = action * term._scale + term._offset
         target_jump = float(torch.max(torch.abs(absolute_target - previous_target)))
+        target_jump_joint = term._joint_names[int(torch.argmax(torch.abs(
+            absolute_target[0] - previous_target[0]
+        )))]
         largest_target_jump = max(largest_target_jump, target_jump)
         previous_target = absolute_target.detach().clone()
         gym_env.step(action)
@@ -235,7 +634,20 @@ def _continue_carry(gym_env, policy, bridge, initial_height):
         height = float(box.data.root_link_pos_w[0, 2])
         gravity = robot.data.projected_gravity_b[0]
         tilt = float(torch.acos(torch.clamp(-gravity[2], -1.0, 1.0)))
+        if (step + 1) % 100 == 0:
+            stage = "handoff" if step < WBC_BRIDGE.interpolation_steps else "loaded_stand" if carry_step < 0 else "carry"
+            print(
+                f"[progress] {stage} step={step - start_step + 1}/{max_steps - start_step} "
+                f"sim_s={(step - start_step + 1) * env.step_dt:.1f} "
+                f"wall_s={time.monotonic() - carry_started_at:.1f} "
+                f"lift_m={height - initial_height:.3f} "
+                f"contacts={left}/{right} tilt_rad={tilt:.3f}",
+                flush=True,
+            )
         lost_contact = lost_contact + 1 if left == 0 or right == 0 else 0
+        loaded_hold = (
+            loaded_hold + 1 if left > 0 and right > 0 and height - initial_height >= 0.12 else 0
+        )
         reason = None
         if tilt > 0.8:
             reason = "bad_orientation"
@@ -243,12 +655,54 @@ def _continue_carry(gym_env, policy, bridge, initial_height):
             reason = "box_drop"
         elif carry_step < 0 and (lost_contact > 5 or height - initial_height < 0.12):
             reason = "bilateral_lift_hold_lost"
-        if step % 10 == 0 or reason is not None or step == max_steps - 1:
+        # Keep every frame around BC3 takeover, including the end of blending.
+        handoff_steps = (
+            transition[0].cfg.gate.max_steps if transition is not None else args_cli.carry_blend_steps
+        )
+        # Every frame through the 2 s deadline (3 s with the walking-command gate).
+        gated = args_cli.com_command_gate or args_cli.walk_after_takeover
+        at_carry_boundary = -5 <= carry_step <= max(150 if gated else 100, handoff_steps + 5)
+        # The stabilizer reference needs dense samples across contact modes.
+        record_every = 2 if stabilizer is not None or diagnostics is not None else 10
+        if step % record_every == 0 or at_carry_boundary or reason is not None or step == max_steps - 1:
             trace.append({
-                "step": step, "time_seconds": (step + 1) * env.step_dt,
-                "stage": "handoff" if step < 100 else "loaded_stand" if carry_step < 0 else "carry",
+                "step": step, "time_seconds": (step - start_step + 1) * env.step_dt,
+                "stage": "handoff" if step < WBC_BRIDGE.interpolation_steps else "loaded_stand" if carry_step < 0 else "carry",
+                "carry_step": carry_step,
+                "bc3_blending": (
+                    carry_step >= 0 and float(transition[0].alpha[0]) < 1.0
+                    if transition is not None else carry_step >= 0 and blend_weight < 1.0
+                ),
+                "bc3_blend_weight": (
+                    None if carry_step < 0
+                    else float(transition[0].alpha[0]) if transition is not None else blend_weight
+                ),
+                "transition_com_shift_m": (
+                    transition[0].com_shift[0].detach().cpu().tolist()
+                    if transition is not None and carry_step >= 0 else None
+                ),
+                "com_predictive_blend": com_debug,
+                "com_stabilizer": stabilizer_log,
+                "com_consistent_blend": consistent_log,
+                "capture_command_guard": capture_guard_log,
+                "transition_diagnostics": (diagnostics.sample(navigation, staging_reached, stable_staging)
+                                           if diagnostics is not None else None),
+                "grip_compensation": grip_log,
+                "grip_residual": residual_log,
+                "applied_torque_arm_max_nm": float(robot.data.applied_torque[0].abs().max()),
+                "walking_command_started": (
+                    walking_start_step is not None
+                    if args_cli.com_command_gate or args_cli.walk_after_takeover else None
+                ),
+                "com_relative_to_feet_b": com_relative_to_feet_b(env)[0].detach().cpu().tolist()
+                if transition is not None else None,
+                "foot_load_fraction": foot_loads(env)[0].detach().cpu().tolist()
+                if transition is not None else None,
+                "candidate_unlocked_target_jump_rad": candidate_jump,
                 "box_position": box.data.root_link_pos_w[0].detach().cpu().tolist(),
                 "box_velocity": box.data.root_link_lin_vel_w[0].detach().cpu().tolist(),
+                # Distinguishes arm sag (wrists drop with the Box) from slip (Box drops between them).
+                "wrist_positions_w": robot.data.body_link_pos_w[0, wrist_ids].detach().cpu().tolist(),
                 "lift_height_m": height - initial_height,
                 "contacts": [left, right], "root_tilt_rad": tilt,
                 "root_velocity_body": robot.data.root_lin_vel_b[0].detach().cpu().tolist(),
@@ -257,11 +711,13 @@ def _continue_carry(gym_env, policy, bridge, initial_height):
                 "joint_target_names": list(term._joint_names),
                 "joint_position_names": list(robot.data.joint_names),
                 "target_jump_rad": target_jump,
+                "target_jump_joint": target_jump_joint,
             })
         if reason:
-            return {"success": False, "reason": reason, "steps": step + 1,
+            return {"grip_readiness": grip_readiness_log, "success": False, "reason": reason, "steps": step - start_step + 1,
                     "stage": "stabilization" if carry_step < 0 else "carry",
-                    "max_target_jump_rad": largest_target_jump, "trace": trace}
+                    "max_target_jump_rad": largest_target_jump, "trace": trace,
+                    "transition_snapshot": snapshot_capture if transition_snapshots is not None else None}
         if carry_step >= 0:
             staging_reached = staging_reached or bool(navigation.at_staging[0])
             stable_staging = (
@@ -270,17 +726,20 @@ def _continue_carry(gym_env, policy, bridge, initial_height):
                 else 0
             )
             if stable_staging >= 100:
-                return {"success": True, "reason": "carry_success", "steps": step + 1,
-                        "max_target_jump_rad": largest_target_jump, "trace": trace}
-    return {"success": False, "reason": "carry_horizon", "steps": step + 1,
-            "max_target_jump_rad": largest_target_jump, "trace": trace}
+                return {"grip_readiness": grip_readiness_log, "success": True, "reason": "carry_success", "steps": step - start_step + 1,
+                        "max_target_jump_rad": largest_target_jump, "trace": trace,
+                        "transition_snapshot": snapshot_capture if transition_snapshots is not None else None}
+    return {"grip_readiness": grip_readiness_log, "success": False, "reason": "carry_horizon", "steps": step - start_step + 1,
+            "max_target_jump_rad": largest_target_jump, "trace": trace,
+            "transition_snapshot": snapshot_capture if transition_snapshots is not None else None}
 
 
 def main() -> None:
     policy = load_bc_policy(args_cli.checkpoint, args_cli.device)
     if policy.skill_phase != SkillPhase.GRASP_LIFT:
         raise ValueError("checkpoint must be a grasp_lift BC-2 policy")
-    trajectory = ArenaLiftTrajectory(args_cli.arena_dataset)
+    trajectory = (None if args_cli.transition_snapshot_input or args_cli.grasp_snapshot_input
+                  else ArenaLiftTrajectory(args_cli.arena_dataset))
     video_path = (
         None
         if args_cli.video_output is None
@@ -321,17 +780,101 @@ def main() -> None:
             carry_policy.carry_runtime_contract,
             expected_ordered_joint_names=env.action_manager.get_term("JointPositionAction")._joint_names,
         )
+    transition = None
+    if args_cli.transition_checkpoint:
+        from unitree_rl_lab.utils.transition_policy import (
+            CarryTransitionController, TransitionPolicyCfg, load_transition_actor,
+        )
+
+        transition_actor = load_transition_actor(args_cli.transition_checkpoint, env.device)
+        transition_stage = {1: 1, 3: 2}[transition_actor[-1].out_features]
+        transition = (
+            CarryTransitionController(
+                env,
+                carry_checkpoint=args_cli.carry_checkpoint,
+                cfg=TransitionPolicyCfg(stage=transition_stage, gate=TransitionGateCfg(step_dt=env.step_dt)),
+            ),
+            transition_actor,
+        )
+    residual = None
+    residual_provenance = None
+    if args_cli.residual_checkpoint:
+        from unitree_rl_lab.utils.grip_residual_policy import GripResidualController, load_residual_config
+        from unitree_rl_lab.utils.teacher.grip_residual import GripResidualCfg
+        from unitree_rl_lab.utils.transition_policy import load_transition_actor
+
+        residual_provenance = load_residual_config(args_cli.residual_checkpoint)
+        residual_cfg = dict(residual_provenance["residual"])
+        if args_cli.residual_box_obs_noise_m is not None:
+            residual_cfg["box_obs_noise_m"] = args_cli.residual_box_obs_noise_m
+        if args_cli.residual_box_obs_delay_steps is not None:
+            residual_cfg["box_obs_delay_steps"] = args_cli.residual_box_obs_delay_steps
+        residual_cfg = GripResidualCfg.from_dict(residual_cfg)
+        if residual_cfg.schedule.blend_steps != args_cli.carry_blend_steps:
+            raise ValueError("the residual was trained over a different blend length")
+        residual_actor = load_transition_actor(args_cli.residual_checkpoint, env.device)
+        if residual_actor[-1].out_features != residual_cfg.action_dim:
+            raise ValueError("residual checkpoint does not have a 15-D leg/waist output")
+        residual = (
+            GripResidualController(env, carry_checkpoint=args_cli.carry_checkpoint, residual_cfg=residual_cfg),
+            residual_actor, residual_cfg.variant,
+        )
+        residual_provenance = {"trained": residual_provenance, "evaluated": residual_cfg.to_dict()}
     hold_required = int(math.ceil(args_cli.hold_seconds / env.step_dt))
     checkpoint_path = Path(args_cli.checkpoint).expanduser().resolve()
     checkpoint_sha256 = file_sha256(checkpoint_path)
-    teacher_bridge = ArenaWBCBridge(arena_root=args_cli.arena_root, step_timeout_s=10.0)
+    snapshot_trials = []
+    snapshot_inputs = args_cli.transition_snapshot_input or args_cli.grasp_snapshot_input
+    snapshot_kind = (SnapshotKind.LOADED_STAND_END if args_cli.transition_snapshot_input
+                     else SnapshotKind.BILATERAL_HOLD)
+    if snapshot_inputs:
+        for source in sorted({str(Path(p).resolve()) for p in snapshot_inputs}):
+            metadata = load_snapshot_store_metadata(source)
+            origin = np.asarray(metadata.get("source_env_origin_w", (0, 0, 0)))
+            if not np.allclose(origin, env.scene.env_origins[0].detach().cpu().numpy(), atol=1e-6):
+                raise ValueError("snapshot and evaluation environment origins must match")
+            source_hash = file_sha256(source)
+            for index, snapshot in enumerate(load_snapshots(
+                source, kind=snapshot_kind,
+                expected_joint_names=env.scene["robot"].data.joint_names,
+            )):
+                snapshot_trials.append({
+                    "snapshot": snapshot, "source_path": source, "source_index": index,
+                    "source_sha256": source_hash, "snapshot_id": f"{source_hash}:{index}",
+                })
+        end = args_cli.transition_snapshot_offset + args_cli.episodes
+        if len(snapshot_trials) < end:
+            raise ValueError(f"requested snapshot range ends at {end}, only {len(snapshot_trials)} available")
+        selected = np.random.default_rng(args_cli.seed or 0).permutation(len(snapshot_trials))[args_cli.transition_snapshot_offset:end]
+        snapshot_trials = [snapshot_trials[i] for i in selected]
+    needs_teacher_bridge = not args_cli.transition_snapshot_input and not (
+        args_cli.grasp_snapshot_input and not WBC_BRIDGE.uses_wbc)
+    teacher_bridge = ArenaWBCBridge(arena_root=args_cli.arena_root, step_timeout_s=10.0) if needs_teacher_bridge else None
     student_bridge = (
         ArenaWBCBridge(arena_root=args_cli.arena_root, step_timeout_s=10.0)
-        if policy.action_key == "teacher_high_level_action"
+        if policy.action_key == "teacher_high_level_action" and not snapshot_inputs
         else None
     )
     snapshots = None
     published_snapshot_path = None
+    transition_snapshots = None
+    published_transition_snapshot_path = None
+    if args_cli.transition_snapshot_output:
+        transition_snapshots = PhysicalSnapshotStore(
+            args_cli.transition_snapshot_output,
+            joint_names=list(env.scene["robot"].data.joint_names),
+            overwrite=args_cli.overwrite,
+            metadata={
+                "producer": "evaluate_bc2_rollout",
+                "source": str(Path(args_cli.checkpoint).expanduser().resolve()),
+                "carry_checkpoint": str(Path(args_cli.carry_checkpoint).expanduser().resolve()),
+                "carry_checkpoint_sha256": file_sha256(args_cli.carry_checkpoint),
+                "gate": "WBC loaded stand completed; last_action is the WBC anchor for the BC3 transition",
+                "carry_blend_steps": args_cli.carry_blend_steps,
+                "source_env_origin_w": env.scene.env_origins[0].detach().cpu().tolist(),
+                "box_teleport_into_hands": False,
+            },
+        )
     if args_cli.snapshot_output:
         snapshots = PhysicalSnapshotStore(
             args_cli.snapshot_output,
@@ -355,6 +898,65 @@ def main() -> None:
     episode_results = []
     try:
         for episode in range(args_cli.episodes):
+            if snapshot_trials:
+                trial = snapshot_trials[episode]
+                snapshot = trial["snapshot"]
+                trial_seed = (args_cli.seed or 0) + args_cli.transition_snapshot_offset + episode
+                gym_env.reset(seed=trial_seed)
+                robot, box = env.scene["robot"], env.scene["box"]
+                restore_physical_snapshot(
+                    env, snapshot, expected_box_size=np.full(3, BOX_SIZE_M),
+                    # Payload stress test: the snapshot was captured with a different
+                    # Box mass, so the heavier payload appears at the handoff.
+                    expected_box_mass_kg=(
+                        BOX_MASS_KG if args_cli.snapshot_box_mass_kg is None else args_cli.snapshot_box_mass_kg
+                    ),
+                )
+                env.command_manager.compute(0.0)
+                # Identical controlled warm-up for every duration; no zero-action step.
+                anchor = torch.as_tensor(snapshot.last_action, device=env.device).float()[None, :]
+                gym_env.step(anchor)
+                env.task_phase[0] = 1
+                env.command_manager.compute(0.0)
+                left, right = box_contact_counts(env)
+                initial_height = float(snapshot.box_root_link_state_w[2] - snapshot.lift_height_m)
+                lift_height = float(box.data.root_link_pos_w[0, 2]) - initial_height
+                tilt = float(torch.acos(torch.clamp(-robot.data.projected_gravity_b[0, 2], -1, 1)))
+                valid = restored_snapshot_gate(
+                    snapshot, left_contact_count=left, right_contact_count=right,
+                    lift_height_m=lift_height, bad_orientation=tilt > 0.8,
+                    box_dropped=lift_height < 0.08,
+                )
+                bad_orientations += int(tilt > 0.8)
+                actual_box_mass = float(box.root_physx_view.get_masses()[0].sum())
+                if not math.isclose(actual_box_mass, BOX_MASS_KG, rel_tol=1e-4):
+                    raise RuntimeError("restored scene Box mass mismatch")
+                print(f"[snapshot-eval] {episode + 1}/{args_cli.episodes} id={trial['snapshot_id']} valid={valid}", flush=True)
+                result = {
+                    "episode": episode, "success": valid, "restore_success": valid,
+                    "bad_orientation": tilt > 0.8,
+                    "reason": "restored_start_valid" if valid else "restore_gate_failed",
+                    "actual_box_mass_kg": actual_box_mass,
+                    "snapshot_id": trial["snapshot_id"], "trial_seed": trial_seed,
+                    "snapshot_selection_index": args_cli.transition_snapshot_offset + episode,
+                    "source_episode": snapshot.source_episode,
+                    "start_features": _restored_start_features(env),
+                    "restored_contacts": [left, right], "restored_lift_height_m": lift_height,
+                }
+                grasp_start = snapshot_kind == SnapshotKind.BILATERAL_HOLD
+                if grasp_start and teacher_bridge is not None:
+                    teacher_bridge.reset()
+                result["carry"] = _continue_carry(
+                    gym_env, carry_policy, teacher_bridge if grasp_start else None, initial_height,
+                    episode=episode, transition=transition, skip_stabilization=not grasp_start,
+                    residual=residual, residual_seed=trial_seed,
+                ) if valid else {"success": False, "reason": "restore_gate_failed"}
+                result["chain_success"] = result["carry"]["success"]
+                episode_results.append(result)
+                displayed = {k: v for k, v in result.items() if k not in ("carry", "start_features")}
+                displayed["carry"] = {k: v for k, v in result["carry"].items() if k != "trace"}
+                print(displayed, flush=True)
+                continue
             if carry_policy is not None:
                 print(f"[chain] Episode {episode + 1}: Teacher APPROACH", flush=True)
             observation, _ = gym_env.reset()
@@ -363,6 +965,12 @@ def main() -> None:
                 student_bridge.reset()
             robot = env.scene["robot"]
             box = env.scene["box"]
+            actual_box_mass = float(box.root_physx_view.get_masses()[0].sum())
+            if not math.isclose(actual_box_mass, BOX_MASS_KG, rel_tol=1e-4, abs_tol=1e-6):
+                raise RuntimeError(
+                    f"Box mass mismatch: requested {BOX_MASS_KG} kg, simulated {actual_box_mass} kg"
+                )
+            print(f"[chain] Box mass: {actual_box_mass:.4f} kg", flush=True)
             pelvis = body_id(robot, "pelvis")
             initial_box_pose = torch.cat(
                 (box.data.root_link_pos_w[0], box.data.root_link_quat_w[0])
@@ -376,6 +984,7 @@ def main() -> None:
             bad_orientation = False
             reason = "horizon"
             max_steps = int(math.ceil(args_cli.episode_seconds / env.step_dt))
+            grasp_started_at = time.monotonic()
             for step in range(max_steps):
                 env.task_phase[0] = 0
                 env.command_manager.compute(0.0)
@@ -412,6 +1021,15 @@ def main() -> None:
                     else 0
                 )
                 max_hold = max(max_hold, hold_steps)
+                if (step + 1) % 100 == 0:
+                    print(
+                        f"[progress] approach_grasp step={step + 1}/{max_steps} "
+                        f"sim_s={(step + 1) * env.step_dt:.1f} "
+                        f"wall_s={time.monotonic() - grasp_started_at:.1f} "
+                        f"lift_m={lift_height:.3f} contacts={left}/{right} "
+                        f"hold_steps={hold_steps}/{hold_required}",
+                        flush=True,
+                    )
                 gravity = robot.data.projected_gravity_b[0]
                 bad_orientation = bool(
                     torch.acos(torch.clamp(-gravity[2], -1.0, 1.0)) > 0.8
@@ -460,10 +1078,16 @@ def main() -> None:
                 "reason": reason,
                 "steps": step + 1,
                 "initial_box_xy_m": initial_box_pose_np[:2].tolist(),
+                "actual_box_mass_kg": actual_box_mass,
             }
             if carry_policy is not None:
                 result["carry"] = (
-                    _continue_carry(gym_env, carry_policy, teacher_bridge, initial_height)
+                    _continue_carry(
+                        gym_env, carry_policy, teacher_bridge, initial_height,
+                        transition_snapshots=transition_snapshots, episode=episode,
+                        transition=transition, residual=residual,
+                        residual_seed=(args_cli.seed or 0) + episode,
+                    )
                     if success else {"success": False, "reason": "grasp_not_reached"}
                 )
                 result["chain_success"] = result["carry"]["success"]
@@ -501,12 +1125,26 @@ def main() -> None:
                 published_snapshot_path = snapshots.finalize()
             else:
                 snapshots.abort()
+        if transition_snapshots is not None:
+            if transition_snapshots.count:
+                published_transition_snapshot_path = transition_snapshots.finalize()
+            else:
+                transition_snapshots.abort()
     except BaseException:
+        # The last atomic checkpoint remains valid even when this run is interrupted.
+        if transition_snapshots is not None and transition_snapshots.checkpoint_count:
+            print(
+                f"[snapshot] interrupted; preserved {transition_snapshots.checkpoint_count} snapshots "
+                f"at {transition_snapshots.path}", flush=True,
+            )
         if snapshots is not None:
             snapshots.abort()
+        if transition_snapshots is not None:
+            transition_snapshots.abort()
         raise
     finally:
-        teacher_bridge.close()
+        if teacher_bridge is not None:
+            teacher_bridge.close()
         if student_bridge is not None:
             student_bridge.close()
         gym_env.close()
@@ -519,27 +1157,88 @@ def main() -> None:
         "strict_lift_m": 0.12,
         "box_size_m": BOX_SIZE_M,
         "box_mass_kg": BOX_MASS_KG,
+        "snapshot_box_mass_kg": args_cli.snapshot_box_mass_kg,
         "box_x_range_m": list(args_cli.box_x_range),
         "box_y_range_m": list(args_cli.box_y_range),
         "control_frequency_hz": 1.0 / env.step_dt,
-        "rollout_mode": "teacher" if args_cli.teacher_only else "student_bc2",
+        "rollout_mode": ("snapshot_grasp" if args_cli.grasp_snapshot_input else "snapshot_transition")
+        if snapshot_trials else "teacher" if args_cli.teacher_only else "student_bc2",
+        **WBC_BRIDGE.as_dict(0.02),
+        "grip_readiness": args_cli.grip_readiness,
+        "grip_readiness_min_contacts": args_cli.grip_readiness_min_contacts if args_cli.grip_readiness else None,
+        "grip_readiness_max_seconds": args_cli.grip_readiness_max_seconds if args_cli.grip_readiness else None,
+        "snapshot_selection": [
+            {k: v for k, v in trial.items() if k != "snapshot"} for trial in snapshot_trials
+        ],
+        "restore_warmup_steps": 1 if snapshot_trials else None,
+        "transition_snapshot_offset": args_cli.transition_snapshot_offset,
+        "com_predictive_blend": args_cli.com_predictive_blend,
+        "com_predictive_mode": args_cli.com_predictive_mode if args_cli.com_predictive_blend else None,
+        "com_consistent_blend": args_cli.com_consistent_blend,
+        "com_consistent_gain": args_cli.com_consistent_gain if args_cli.com_consistent_blend else None,
+        "capture_command_guard": args_cli.capture_command_guard,
+        "transition_diagnostics": args_cli.transition_diagnostics,
+        "com_consistent_lead": args_cli.com_consistent_lead if args_cli.com_consistent_blend else None,
+        "com_command_gate": args_cli.com_command_gate,
+        "walk_after_takeover": args_cli.walk_after_takeover,
+        "grip_compensation": args_cli.grip_compensation,
+        "grip_squeeze_factor": args_cli.grip_squeeze_factor if args_cli.grip_compensation else None,
+        "com_stabilizer": args_cli.com_stabilizer,
+        "com_stabilizer_gain": args_cli.com_stabilizer_gain if args_cli.com_stabilizer == "on" else None,
+        "com_stabilizer_reference": args_cli.com_stabilizer_reference,
         "seed": args_cli.seed,
         "rule_based_place": args_cli.rule_based_place,
         "place_seconds": args_cli.place_seconds if args_cli.rule_based_place else None,
         "carry_seconds": args_cli.carry_seconds if carry_policy is not None else None,
+        "carry_blend_steps": args_cli.carry_blend_steps if carry_policy is not None else None,
+        "transition_checkpoint": args_cli.transition_checkpoint,
+        "transition_checkpoint_sha256": (
+            file_sha256(args_cli.transition_checkpoint) if args_cli.transition_checkpoint else None
+        ),
         "video_output_prefix": None if video_path is None else str(video_path),
+        "residual_checkpoint": args_cli.residual_checkpoint,
+        "residual_checkpoint_sha256": (
+            file_sha256(args_cli.residual_checkpoint) if args_cli.residual_checkpoint else None
+        ),
+        "residual": residual_provenance,
     }
+    if args_cli.com_predictive_blend and args_cli.com_predictive_mode == "v2":
+        from dataclasses import asdict
+        from unitree_rl_lab.utils.teacher.com_schedule_blend import ComScheduleCfg
+        evaluator_config["com_predictive_blend_config"] = asdict(ComScheduleCfg(step_dt=env.step_dt))
+        evaluator_config["com_predictive_blend_model"] = {
+            "prediction": "schedule_first_order_tracking_jacobian_lip_capture_point_v2",
+            "state_source": "simulation_ground_truth",
+            "includes_payload_mass": True,
+            "support": "convex_hull_of_loaded_foot_rectangles_held_over_horizon",
+            "bc3_target_held_over_horizon": True,
+            "predicts_contact_changes": False,
+            "adds_posture_residual": False,
+            "walking_command_gate": args_cli.com_command_gate,
+        }
+    elif args_cli.com_predictive_blend:
+        from dataclasses import asdict
+        from unitree_rl_lab.utils.teacher.com_predictive_blend import ComBlendCfg
+        evaluator_config["com_predictive_blend_config"] = asdict(ComBlendCfg(step_dt=env.step_dt))
+        evaluator_config["com_predictive_blend_model"] = {
+            "prediction": "local_joint_tracking_and_jacobian_capture_point_proxy_v1",
+            "state_source": "simulation_ground_truth",
+            "includes_payload_mass": True,
+            "support": "convex_hull_of_loaded_foot_rectangles",
+            "predicts_contact_changes": False,
+            "adds_posture_residual": False,
+        }
     evaluator_config_sha256 = hashlib.sha256(
         json.dumps(
             evaluator_config, separators=(",", ":"), sort_keys=True
         ).encode("utf-8")
     ).hexdigest()
     metrics = {
-        "format": "unitree_box_live_grasp_carry_preview_v1" if carry_policy is not None else "unitree_box_bc2_physical_rollout_v1",
+        "format": "unitree_transition_snapshot_eval_v1" if snapshot_trials else "unitree_box_live_grasp_carry_preview_v1" if carry_policy is not None else "unitree_box_bc2_physical_rollout_v1",
         "carry_checkpoint": args_cli.carry_checkpoint,
         "carry_checkpoint_sha256": file_sha256(args_cli.carry_checkpoint) if carry_policy is not None else None,
         "episodes": args_cli.episodes,
-        "bimanual_grasp_lift_success_rate": successes / args_cli.episodes,
+        "bimanual_grasp_lift_success_rate": None if snapshot_trials else successes / args_cli.episodes,
         "bad_orientation_rate": bad_orientations / args_cli.episodes,
         "strict_lift_m": 0.12,
         "strict_hold_seconds": args_cli.hold_seconds,
@@ -555,11 +1254,31 @@ def main() -> None:
             if published_snapshot_path is not None
             else None
         ),
+        "transition_snapshot_output_path": (
+            str(published_transition_snapshot_path)
+            if published_transition_snapshot_path is not None else None
+        ),
+        "transition_snapshot_count": transition_snapshots.count if transition_snapshots is not None else 0,
+        "transition_snapshot_skipped": sum(
+            bool(capture) and not capture["recorded"] and capture["reason"] != "transition_not_reached"
+            for result in episode_results
+            for capture in [result.get("carry", {}).get("transition_snapshot")]
+        ),
         "evaluator_config": evaluator_config,
         "evaluator_config_sha256": evaluator_config_sha256,
         "episode_results": episode_results,
     }
-    if carry_policy is not None:
+    if snapshot_trials:
+        eligible = sum(e["restore_success"] for e in episode_results)
+        completed = sum(e["carry"]["success"] for e in episode_results)
+        metrics["snapshot_metrics"] = {
+            "trials": len(episode_results), "restore_valid": eligible,
+            "restore_failures": len(episode_results) - eligible,
+            "carry_successes": completed,
+            "carry_success_given_valid_restore": completed / eligible if eligible else None,
+            "success_rate_over_all_selected_states": completed / len(episode_results),
+        }
+    elif carry_policy is not None:
         metrics["chain_metrics"] = summarize_live_chain(
             episode_results, require_place=args_cli.rule_based_place
         )
@@ -583,5 +1302,14 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except BaseException as exc:
+        # Print before simulator cleanup so a cleanup failure cannot hide the cause.
+        traceback.print_exc()
+        # Kit's fast shutdown otherwise exits with 0 even for a Python exception.
+        import omni.kit.app
+        omni.kit.app.get_app().post_uncancellable_quit(
+            130 if isinstance(exc, KeyboardInterrupt) else 1
+        )
+        raise
     finally:
         simulation_app.close()

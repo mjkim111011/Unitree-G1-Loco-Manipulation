@@ -55,6 +55,34 @@ parser.add_argument("--bc_place_checkpoint", type=str, default=None)
 parser.add_argument("--bc2_gate", type=str, default=None)
 parser.add_argument("--residual_scale", type=float, default=0.20)
 parser.add_argument("--residual_handoff_steps", type=int, default=100)
+parser.add_argument(
+    "--transition_policy",
+    action="store_true",
+    help="Train the WBC-to-BC3 transition gate (Unitree-G1-43dof-CarryTransition); uses --bc_carry_checkpoint.",
+)
+parser.add_argument("--transition_snapshots", nargs="+", default=None, help="LOADED_STAND_END snapshot stores")
+parser.add_argument("--transition_stage", type=int, choices=(1, 2), default=1, help="1: gate only, 2: gate + CoM")
+parser.add_argument(
+    "--transition_stage1_checkpoint", type=str, default=None,
+    help="Initialize a stage-2 actor/critic from this stage-1 model checkpoint",
+)
+parser.add_argument(
+    "--grip_residual",
+    action="store_true",
+    help="Train the leg/waist residual over the direct BC2->BC3 fixed blend (Unitree-G1-43dof-GripResidual); "
+    "uses --bc_carry_checkpoint.",
+)
+parser.add_argument("--residual_snapshots", nargs="+", default=None, help="BILATERAL_HOLD training snapshot stores")
+parser.add_argument("--residual_variant", choices=("body", "grip"), default="grip",
+                    help="body: body-state obs + stability reward; grip: + Box estimate obs and grip reward")
+parser.add_argument("--residual_max_rad", type=float, default=0.05)
+parser.add_argument("--residual_max_rate_rad", type=float, default=0.005)
+parser.add_argument("--residual_box_obs_noise_m", type=float, default=0.005)
+parser.add_argument("--residual_box_obs_delay_steps", type=int, default=2)
+parser.add_argument("--residual_friction_weight", type=float, default=0.0,
+                    help="Friction-ratio penalty weight (0 until the full-hand force check passes)")
+parser.add_argument("--residual_unbalanced_sampling", action="store_true",
+                    help="Sample snapshots uniformly over the pool instead of uniformly over stores")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -125,6 +153,8 @@ from unitree_rl_lab.utils.export_deploy_cfg import export_deploy_cfg
 from unitree_rl_lab.utils.rnd_safety import install_rnd_safety_mask
 from unitree_rl_lab.utils.bc_residual import BcResidualActionWrapper, ResidualNominalCfg
 from unitree_rl_lab.utils.teacher.skill_fsm import SkillPhase
+from unitree_rl_lab.utils.teacher.transition_gate import TransitionGateCfg
+from unitree_rl_lab.utils.usd_cache import assign_unique_usd_dirs
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -158,6 +188,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # controller layered on top of it.
         agent_cfg.policy.init_noise_std = 0.05
         agent_cfg.algorithm.entropy_coef = min(agent_cfg.algorithm.entropy_coef, 5.0e-4)
+    if args_cli.transition_policy:
+        if args_cli.bc_residual:
+            raise ValueError("--transition_policy and --bc_residual are mutually exclusive")
+        if not args_cli.bc_carry_checkpoint or not args_cli.transition_snapshots:
+            raise ValueError("--transition_policy requires --bc_carry_checkpoint and --transition_snapshots")
+        if args_cli.transition_stage1_checkpoint and args_cli.transition_stage != 2:
+            raise ValueError("--transition_stage1_checkpoint only initializes stage 2")
+        agent_cfg.experiment_name = f"g1_43dof_carry_transition_stage{args_cli.transition_stage}"
+        if args_cli.transition_stage == 2:
+            env_cfg.rewards.weight_shift_at_first_swing.weight = 1.0
+    if args_cli.grip_residual:
+        if args_cli.bc_residual or args_cli.transition_policy:
+            raise ValueError("--grip_residual excludes --bc_residual and --transition_policy")
+        if not args_cli.bc_carry_checkpoint or not args_cli.residual_snapshots:
+            raise ValueError("--grip_residual requires --bc_carry_checkpoint and --residual_snapshots")
+        from importlib import import_module  # the "29dof" package name is not an identifier
+
+        import_module("unitree_rl_lab.tasks.locomotion.robots.g1.29dof.grip_residual_env_cfg").set_residual_variant(
+            env_cfg, args_cli.residual_variant
+        )
+        if args_cli.residual_variant == "grip":
+            env_cfg.rewards.friction_ratio_excess.weight = -abs(args_cli.residual_friction_weight)
+        agent_cfg.experiment_name = f"g1_43dof_grip_residual_{args_cli.residual_variant}"
+    # Unique per-process USD conversion directory (the seeded default collides across processes).
+    print(f"[INFO] USD conversion directories: {assign_unique_usd_dirs(env_cfg.scene)}")
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -216,6 +271,55 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"bounded PPO residual scale {args_cli.residual_scale}."
         )
 
+    transition_controller = None
+    if args_cli.transition_policy:
+        from unitree_rl_lab.utils.transition_policy import (
+            CarryTransitionController,
+            TransitionPolicyCfg,
+            TransitionPolicyWrapper,
+        )
+
+        transition_controller = CarryTransitionController(
+            env.unwrapped,
+            carry_checkpoint=args_cli.bc_carry_checkpoint,
+            snapshot_paths=args_cli.transition_snapshots,
+            cfg=TransitionPolicyCfg(
+                stage=args_cli.transition_stage,
+                gate=TransitionGateCfg(step_dt=env.unwrapped.step_dt),
+            ),
+        )
+        env = TransitionPolicyWrapper(env, transition_controller)
+        print(
+            f"[INFO] Transition policy stage {args_cli.transition_stage} over frozen WBC anchor + BC3 "
+            f"({transition_controller.pool_size} snapshots)."
+        )
+
+    residual_controller = None
+    if args_cli.grip_residual:
+        from unitree_rl_lab.utils.grip_residual_policy import GripResidualController, GripResidualWrapper
+        from unitree_rl_lab.utils.teacher.grip_residual import GripResidualCfg, ResidualScheduleCfg
+
+        residual_controller = GripResidualController(
+            env.unwrapped,
+            carry_checkpoint=args_cli.bc_carry_checkpoint,
+            snapshot_paths=args_cli.residual_snapshots,
+            residual_cfg=GripResidualCfg(
+                variant=args_cli.residual_variant,
+                max_residual_rad=args_cli.residual_max_rad,
+                max_rate_rad=args_cli.residual_max_rate_rad,
+                schedule=ResidualScheduleCfg(step_dt=env.unwrapped.step_dt),
+                box_obs_noise_m=args_cli.residual_box_obs_noise_m,
+                box_obs_delay_steps=args_cli.residual_box_obs_delay_steps,
+            ),
+            balance_snapshot_sources=not args_cli.residual_unbalanced_sampling,
+            seed=agent_cfg.seed,
+        )
+        env = GripResidualWrapper(env, residual_controller)
+        print(
+            f"[INFO] Grip residual ({args_cli.residual_variant}) over the frozen direct-handoff blend + BC3 "
+            f"({residual_controller.pool_size} BILATERAL_HOLD snapshots)."
+        )
+
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
@@ -233,7 +337,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
     # wrap around environment for rsl-rl
-    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    if transition_controller is not None:
+        from unitree_rl_lab.utils.transition_policy import TransitionRslRlVecEnvWrapper
+
+        env = TransitionRslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    elif residual_controller is not None:
+        from unitree_rl_lab.utils.grip_residual_policy import GripResidualRslRlVecEnvWrapper
+
+        env = GripResidualRslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    else:
+        env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # create runner from rsl-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
@@ -246,6 +359,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         torch.nn.init.zeros_(actor_linear_layers[-1].weight)
         torch.nn.init.zeros_(actor_linear_layers[-1].bias)
         print("[INFO] Zero-initialized PPO residual mean at the frozen BC nominal action.")
+    if transition_controller is not None and not agent_cfg.resume:
+        from unitree_rl_lab.utils.transition_policy import initialize_transition_actor
+
+        initialize_transition_actor(runner.alg.policy, stage1_checkpoint=args_cli.transition_stage1_checkpoint)
+    if residual_controller is not None and not agent_cfg.resume:
+        from unitree_rl_lab.utils.grip_residual_policy import zero_residual_actor_output
+
+        zero_residual_actor_output(runner.alg.policy)
     # Box pick-and-place exposes this internal-only observation group.  It
     # prevents RND from rewarding unsafe/falling states without patching the
     # environment-wide rsl_rl installation used by other tasks.
@@ -270,7 +391,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with open(residual_path, "w", encoding="utf-8") as stream:
             json.dump(residual_wrapper.provenance(), stream, indent=2, sort_keys=True)
             stream.write("\n")
-    export_deploy_cfg(env.unwrapped, log_dir, agent_cfg.obs_groups["policy"])
+    if transition_controller is not None:
+        import json
+
+        with open(os.path.join(log_dir, "params", "transition_policy.json"), "w", encoding="utf-8") as stream:
+            json.dump(transition_controller.provenance(), stream, indent=2, sort_keys=True)
+            stream.write("\n")
+    elif residual_controller is not None:
+        import json
+
+        provenance = residual_controller.provenance()
+        provenance.update({
+            "seed": agent_cfg.seed, "num_envs": env.unwrapped.num_envs,
+            "command": sys.argv, "cli": vars(args_cli),
+            "reward_weights": {name: term.weight for name, term in vars(env_cfg.rewards).items()
+                               if hasattr(term, "weight")},
+        })
+        with open(os.path.join(log_dir, "params", "grip_residual.json"), "w", encoding="utf-8") as stream:
+            json.dump(provenance, stream, indent=2, sort_keys=True, default=str)
+            stream.write("\n")
+    else:
+        export_deploy_cfg(env.unwrapped, log_dir, agent_cfg.obs_groups["policy"])
     # copy the environment configuration file to the log directory
     shutil.copy(
         inspect.getfile(env_cfg.__class__),
