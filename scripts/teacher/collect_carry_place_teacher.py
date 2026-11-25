@@ -80,8 +80,18 @@ parser.add_argument(
     "--loaded_stand_steps",
     type=int,
     default=250,
-    help="Additional zero-command Homie balance steps required before Carry walking",
+    help="Additional zero-command Homie balance steps required before Carry walking "
+         "(0 = walk right after the handoff, matching the direct BC2 -> BC3 deployment)",
 )
+parser.add_argument(
+    "--grip_readiness",
+    action="store_true",
+    help="Before the Teacher handoff, close under-contacted fingers until both hands keep "
+         "--grip_readiness_min_contacts Box contacts; the re-grip becomes the arm/hand lock "
+         "reference (not recorded as Carry supervision)",
+)
+parser.add_argument("--grip_readiness_min_contacts", type=int, default=2)
+parser.add_argument("--grip_readiness_max_seconds", type=float, default=1.0)
 parser.add_argument(
     "--staging_stabilization_steps",
     type=int,
@@ -204,7 +214,7 @@ if (
     or args_cli.target_successes > args_cli.num_trials
     or args_cli.max_phase_seconds <= 0.0
     or args_cli.controller_handoff_steps <= 0
-    or args_cli.loaded_stand_steps <= 0
+    or args_cli.loaded_stand_steps < 0
     or args_cli.staging_stabilization_steps <= 0
     or args_cli.navigation_ramp_steps <= 0
     or args_cli.carry_staging_standoff_m <= 0.0
@@ -233,6 +243,11 @@ if (
     )
 if args_cli.box_size <= 0.0 or args_cli.box_mass <= 0.0:
     parser.error("fixed Box size and mass must be positive")
+if args_cli.grip_readiness and (
+    args_cli.phase != "carry" or args_cli.grip_readiness_min_contacts < 1
+    or not 0.1 <= args_cli.grip_readiness_max_seconds <= 10.0
+):
+    parser.error("--grip_readiness applies to --phase carry with >= 1 contact and a 0.1-10 s limit")
 if args_cli.work_area_size_m <= 1.5:
     parser.error("--work_area_size_m must exceed 1.5 m")
 if (
@@ -825,6 +840,29 @@ def _run_trial(
     reference_raw_action = torch.as_tensor(
         snapshot.last_action, dtype=torch.float32, device=env.device
     ).unsqueeze(0)
+    grip_readiness_log = None
+    if args_cli.grip_readiness and args_cli.phase == "carry":
+        # Same re-grip as the deployment chain (evaluate_bc2_rollout.py --grip_readiness):
+        # BC2's last targets with only under-contacted fingers closing.  Not recorded.
+        from unitree_rl_lab.utils.teacher.grip_readiness import GripReadiness, GripReadinessCfg
+
+        def _regrip_step(raw):
+            _synchronize_task_phase(env, 1)
+            env.step(raw)
+            _synchronize_task_phase(env, 1)
+
+        reference_raw_action, grip_readiness_log = GripReadiness(env, GripReadinessCfg(
+            min_contacts_per_hand=args_cli.grip_readiness_min_contacts,
+            max_steps=int(round(args_cli.grip_readiness_max_seconds / env.step_dt)),
+        )).run(
+            reference_raw_action, _regrip_step, lambda: box_contact_counts(env),
+            lambda: float(box.data.root_link_pos_w[0, 2]) - box_table_height,
+        )
+        grasp = RealizedBimanualGrasp.capture(
+            box_pose_wxyz=_pose7(box).detach().cpu().numpy(),
+            left_wrist_pose_wxyz=body_pose_wxyz(robot, left_wrist).detach().cpu().numpy(),
+            right_wrist_pose_wxyz=body_pose_wxyz(robot, right_wrist).detach().cpu().numpy(),
+        )
     if args_cli.rule_based_place:
         from unitree_rl_lab.utils.teacher.rule_based_place import run_rule_based_place
         return run_rule_based_place(
@@ -872,18 +910,20 @@ def _run_trial(
                 "right_contact_count": right_count,
                 "lift_height_m": lift_height,
             }
-        loaded_stand_ok, loaded_stand_reason, left_count, right_count, lift_height = (
-            _carry_loaded_stand(
-                env,
-                bridge,
-                teacher,
-                reference_raw_action,
-                robot=robot,
-                box=box,
-                pelvis=pelvis,
-                box_table_height=box_table_height,
+        loaded_stand_ok, loaded_stand_reason = True, "loaded_stand_skipped"
+        if args_cli.loaded_stand_steps > 0:
+            loaded_stand_ok, loaded_stand_reason, left_count, right_count, lift_height = (
+                _carry_loaded_stand(
+                    env,
+                    bridge,
+                    teacher,
+                    reference_raw_action,
+                    robot=robot,
+                    box=box,
+                    pelvis=pelvis,
+                    box_table_height=box_table_height,
+                )
             )
-        )
         if not loaded_stand_ok:
             return {
                 "success": False,
@@ -1001,9 +1041,11 @@ def _run_trial(
             "physical_snapshot_source_episode": snapshot.source_episode,
             "physical_snapshot_source_step": snapshot.source_step,
             "physical_snapshot_provenance": snapshot.provenance,
+            # The lock reference actually applied (BC2's last action, or its re-grip).
             "carry_grasp_lock_reference_raw_action": (
-                snapshot.last_action.tolist() if args_cli.phase == "carry" else None
+                reference_raw_action[0].tolist() if args_cli.phase == "carry" else None
             ),
+            "grip_readiness": grip_readiness_log,
             "place_loaded_raw_reference_action": (
                 snapshot.last_action.tolist() if args_cli.phase == "place" else None
             ),
@@ -1913,6 +1955,9 @@ def main() -> None:
         "required_hold_steps": gate_required_hold_steps,
         "controller_handoff_steps": args_cli.controller_handoff_steps,
         "loaded_stand_steps": args_cli.loaded_stand_steps,
+        "grip_readiness": args_cli.grip_readiness,
+        "grip_readiness_min_contacts": args_cli.grip_readiness_min_contacts if args_cli.grip_readiness else None,
+        "grip_readiness_max_seconds": args_cli.grip_readiness_max_seconds if args_cli.grip_readiness else None,
         "staging_stabilization_steps": args_cli.staging_stabilization_steps,
         "source_snapshot_producer": producer,
         "actual_approach_grasp_chain": producer == "play_bc_skill_fsm",

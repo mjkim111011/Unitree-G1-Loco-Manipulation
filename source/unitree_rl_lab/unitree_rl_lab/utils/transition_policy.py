@@ -89,9 +89,11 @@ class CarryTransitionController:
         carry_checkpoint: str | Path,
         snapshot_paths: Sequence[str | Path] = (),
         cfg: TransitionPolicyCfg | None = None,
+        snapshot_kind: SnapshotKind = SnapshotKind.LOADED_STAND_END,
     ) -> None:
         self.env = env
         self.cfg = (cfg or TransitionPolicyCfg()).validate()
+        self.snapshot_kind = snapshot_kind
         self.device = torch.device(env.device)
         self.num_envs = int(env.num_envs)
         if abs(env.step_dt - self.cfg.gate.step_dt) > 1.0e-9:
@@ -165,16 +167,18 @@ class CarryTransitionController:
     def _load_snapshot_pool(self, paths: Sequence[str | Path]) -> None:
         snapshots = []
         origins = []
-        for path in paths:
+        sources = []
+        for source_index, path in enumerate(paths):
             metadata = load_snapshot_store_metadata(path)
             origin = metadata.get("source_env_origin_w", (0.0, 0.0, 0.0))
-            loaded = load_snapshots(
-                path, kind=SnapshotKind.LOADED_STAND_END, expected_joint_names=self.robot.data.joint_names
-            )
+            loaded = load_snapshots(path, kind=self.snapshot_kind, expected_joint_names=self.robot.data.joint_names)
             snapshots.extend(loaded)
             origins.extend([origin] * len(loaded))
+            sources.extend([source_index] * len(loaded))
         if not snapshots:
-            raise ValueError("no LOADED_STAND_END snapshots were found")
+            raise ValueError(f"no {self.snapshot_kind.name} snapshots were found")
+        self.pool_snapshots = snapshots
+        self.pool_source = torch.as_tensor(sources, dtype=torch.long, device=self.device)
 
         def stack(values) -> torch.Tensor:
             return torch.as_tensor([list(map(float, v.flatten())) for v in values], device=self.device)
@@ -206,6 +210,11 @@ class CarryTransitionController:
             self.pool_bin_center_e = stack([s.bin_center_e for s in snapshots])
             self.pool_bin_qr_e = stack([s.bin_qr_position_e for s in snapshots])
 
+    def sample_snapshots(self, count: int) -> torch.Tensor:
+        """Pool indices for ``count`` resets (uniform over the pool)."""
+
+        return torch.randint(0, self.pool_size, (count,), device=self.device)
+
     def reset_from_snapshots(self, env_ids: torch.Tensor) -> None:
         """Write sampled snapshot states into ``env_ids`` and reset their transition state."""
 
@@ -213,7 +222,7 @@ class CarryTransitionController:
         ids = env_ids.to(self.device, dtype=torch.long)
         if ids.numel() == 0:
             return
-        pick = torch.randint(0, self.pool_size, (ids.numel(),), device=self.device)
+        pick = self.sample_snapshots(ids.numel())
         origins = env.scene.env_origins[ids]
 
         root = self.pool_robot_root[pick].clone()

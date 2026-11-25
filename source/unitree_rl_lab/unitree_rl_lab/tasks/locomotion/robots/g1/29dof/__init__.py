@@ -47,3 +47,14 @@ gym.register(
         ),
     },
 )
+
+gym.register(
+    id="Unitree-G1-43dof-GripResidual",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.grip_residual_env_cfg:GripResidualEnvCfg",
+        "play_env_cfg_entry_point": f"{__name__}.grip_residual_env_cfg:GripResidualPlayEnvCfg",
+        "rsl_rl_cfg_entry_point": "unitree_rl_lab.tasks.locomotion.agents.rsl_rl_ppo_cfg:GripResidualPPORunnerCfg",
+    },
+)

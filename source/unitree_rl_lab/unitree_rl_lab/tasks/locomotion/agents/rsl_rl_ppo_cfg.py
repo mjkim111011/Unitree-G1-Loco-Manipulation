@@ -118,3 +118,41 @@ class CarryTransitionPPORunnerCfg(BasePPORunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class GripResidualPPORunnerCfg(BasePPORunnerCfg):
+    """Bounded leg/waist residual over the frozen fixed-blend BC2 -> BC3 handoff.
+
+    The actor's output layer is zero-initialized by the training script, so the
+    mean policy starts exactly at the baseline; ``init_noise_std`` 0.3 explores
+    +-0.015 rad of a 0.05 rad residual, further smoothed by the rate limit.
+    """
+
+    experiment_name = "g1_43dof_grip_residual"
+    max_iterations = 300
+    save_interval = 50
+    obs_groups = {
+        "policy": ["residual_policy"],
+        "critic": ["residual_critic"],
+    }
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=0.3,
+        actor_hidden_dims=[128, 128],
+        critic_hidden_dims=[256, 128],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.002,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
